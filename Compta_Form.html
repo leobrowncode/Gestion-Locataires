@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Google Sans', Arial, sans-serif;
+      font-size: 13px;
+      color: #333;
+      background: #f8f9fa;
+      padding: 16px;
+    }
+    h2 {
+      font-size: 15px;
+      color: #2C5282;
+      margin-bottom: 14px;
+      font-weight: 600;
+    }
+    .field { margin-bottom: 11px; }
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 3px;
+      color: #444;
+      font-size: 12px;
+    }
+    label .req { color: #e53e3e; }
+    input[type=text], input[type=number], input[type=date], select, textarea {
+      width: 100%;
+      border: 1px solid #cbd5e0;
+      border-radius: 5px;
+      padding: 7px 9px;
+      font-size: 13px;
+      outline: none;
+      background: #fff;
+      transition: border-color .15s;
+    }
+    input:focus, select:focus { border-color: #4A90D9; }
+    .row2 { display: flex; gap: 10px; }
+    .row2 .field { flex: 1; }
+    .cat-hint {
+      font-size: 11px;
+      color: #4A90D9;
+      margin-top: 3px;
+      min-height: 14px;
+      font-style: italic;
+    }
+    .file-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .file-name {
+      font-size: 11px;
+      color: #718096;
+      font-style: italic;
+    }
+    .btn-row {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    button {
+      padding: 8px 18px;
+      border-radius: 5px;
+      border: none;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .btn-cancel {
+      background: #e2e8f0;
+      color: #4a5568;
+    }
+    .btn-cancel:hover { background: #cbd5e0; }
+    .btn-save {
+      background: #2C5282;
+      color: #fff;
+    }
+    .btn-save:hover { background: #1a365d; }
+    .btn-save:disabled { background: #a0aec0; cursor: not-allowed; }
+    .msg {
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 12px;
+      margin-top: 10px;
+      display: none;
+    }
+    .msg.success { background: #c6f6d5; color: #276749; display: block; }
+    .msg.error   { background: #fed7d7; color: #822727; display: block; }
+    .spinner { display: none; font-size: 12px; color: #718096; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h2>➕ Ajouter une charge</h2>
+
+  <form id="f">
+    <!-- Date + Catégorie -->
+    <div class="row2">
+      <div class="field">
+        <label>Date <span class="req">*</span></label>
+        <input type="date" id="date" required>
+      </div>
+      <div class="field">
+        <label>Chambre</label>
+        <select id="chambre">
+          <option value="">— Commune —</option>
+          <option value="1">Chambre 1</option>
+          <option value="2">Chambre 2</option>
+          <option value="3">Chambre 3</option>
+          <option value="Commun">Commun</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Description -->
+    <div class="field">
+      <label>Description / Libellé <span class="req">*</span></label>
+      <input type="text" id="desc" placeholder="Ex : Facture EDF mai 2026" required
+             oninput="onDescInput(this.value)">
+      <div class="cat-hint" id="catHint"></div>
+    </div>
+
+    <!-- Catégorie -->
+    <div class="field">
+      <label>Catégorie <span class="req">*</span></label>
+      <select id="cat" required>
+        <option value="">— Choisir —</option>
+      </select>
+    </div>
+
+    <!-- Montant -->
+    <div class="field">
+      <label>Montant (€) <span class="req">*</span></label>
+      <input type="number" id="montant" step="0.01" min="0.01"
+             placeholder="0,00" required>
+    </div>
+
+    <!-- Justificatif -->
+    <div class="field">
+      <label>Justificatif (optionnel)</label>
+      <div class="file-label">
+        <input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png,.webp"
+               style="display:none" onchange="onFileChosen(this)">
+        <button type="button" onclick="document.getElementById('fileInput').click()"
+                style="background:#e2e8f0;color:#4a5568;padding:6px 12px;
+                       border-radius:4px;border:none;cursor:pointer;font-size:12px;">
+          📎 Choisir un fichier
+        </button>
+        <span class="file-name" id="fileName">Aucun fichier sélectionné</span>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button type="button" class="btn-cancel" onclick="google.script.host.close()">Annuler</button>
+      <button type="submit" class="btn-save" id="btnSave">Enregistrer</button>
+    </div>
+
+    <div class="spinner" id="spinner">⏳ Enregistrement en cours…</div>
+    <div class="msg" id="msg"></div>
+  </form>
+
+  <script>
+    var fileBase64 = null, fileName2 = null, fileMime = null;
+
+    // Initialisation : charger les données depuis le serveur
+    google.script.run
+      .withSuccessHandler(function(data) {
+        var catSel = document.getElementById('cat');
+        data.categories.forEach(function(c) {
+          var o = document.createElement('option'); o.value = c; o.textContent = c;
+          catSel.appendChild(o);
+        });
+        document.getElementById('date').value = data.today;
+      })
+      .getComptaFormData();
+
+    // Auto-catégorisation au fil de la frappe (debounced)
+    var debTimer = null;
+    function onDescInput(val) {
+      clearTimeout(debTimer);
+      if (val.length < 3) { document.getElementById('catHint').textContent = ''; return; }
+      debTimer = setTimeout(function() {
+        google.script.run
+          .withSuccessHandler(function(cat) {
+            var hint = document.getElementById('catHint');
+            if (cat) {
+              hint.textContent = '✨ Suggestion : ' + cat;
+              // Pré-remplir si aucune catégorie déjà choisie
+              var sel = document.getElementById('cat');
+              if (!sel.value) sel.value = cat;
+            } else {
+              hint.textContent = '';
+            }
+          })
+          .autoCategorie(val);
+      }, 350);
+    }
+
+    // Chargement du fichier en base64
+    function onFileChosen(input) {
+      if (!input.files || !input.files[0]) return;
+      var file = input.files[0];
+      document.getElementById('fileName').textContent = file.name + ' (' + Math.round(file.size/1024) + ' Ko)';
+      fileMime = file.type;
+      fileName2 = file.name;
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        // Extraire le base64 pur (sans le préfixe data:...)
+        fileBase64 = e.target.result.split(',')[1];
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Soumission du formulaire
+    document.getElementById('f').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var btn = document.getElementById('btnSave');
+      btn.disabled = true;
+      document.getElementById('spinner').style.display = 'block';
+      hideMsg();
+
+      var data = {
+        date:         document.getElementById('date').value,
+        categorie:    document.getElementById('cat').value,
+        description:  document.getElementById('desc').value,
+        montant:      document.getElementById('montant').value,
+        chambre:      document.getElementById('chambre').value,
+        justifBase64: fileBase64,
+        justifName:   fileName2,
+        justifMime:   fileMime
+      };
+
+      google.script.run
+        .withSuccessHandler(function() {
+          document.getElementById('spinner').style.display = 'none';
+          showMsg('success', '✅ Charge enregistrée avec succès !');
+          resetForm();
+          btn.disabled = false;
+        })
+        .withFailureHandler(function(err) {
+          document.getElementById('spinner').style.display = 'none';
+          showMsg('error', '❌ ' + err.message);
+          btn.disabled = false;
+        })
+        .receiveCharge(data);
+    });
+
+    function resetForm() {
+      document.getElementById('desc').value = '';
+      document.getElementById('montant').value = '';
+      document.getElementById('cat').value = '';
+      document.getElementById('chambre').value = '';
+      document.getElementById('fileName').textContent = 'Aucun fichier sélectionné';
+      document.getElementById('fileInput').value = '';
+      document.getElementById('catHint').textContent = '';
+      fileBase64 = null; fileName2 = null; fileMime = null;
+      // Laisser la date en place pour faciliter la saisie en série
+    }
+
+    function showMsg(type, text) {
+      var el = document.getElementById('msg');
+      el.className = 'msg ' + type;
+      el.textContent = text;
+    }
+    function hideMsg() {
+      var el = document.getElementById('msg');
+      el.className = 'msg';
+    }
+  </script>
+</body>
+</html>

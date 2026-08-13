@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Google Sans', Arial, sans-serif;
+      font-size: 13px;
+      color: #333;
+      background: #f8f9fa;
+      display: flex; flex-direction: column; height: 100%; overflow: hidden;
+    }
+    .steps {
+      display: flex; background: #2C5282;
+      padding: 10px 16px 0; gap: 4px;
+    }
+    .step-tab {
+      padding: 7px 14px; color: rgba(255,255,255,0.6);
+      font-size: 12px; font-weight: 500;
+      border-radius: 5px 5px 0 0; cursor: default;
+    }
+    .step-tab.active { background: #f8f9fa; color: #2C5282; font-weight: 700; }
+    .step-tab.done   { color: rgba(255,255,255,0.85); }
+
+    .content { flex: 1; overflow-y: auto; padding: 16px; }
+    h3 { font-size: 13px; font-weight: 700; color: #2C5282; margin-bottom: 10px; }
+
+    .field { margin-bottom: 10px; }
+    label { display: block; font-weight: 600; margin-bottom: 3px; font-size: 12px; color: #444; }
+    input[type=text], select, textarea {
+      width: 100%; border: 1px solid #cbd5e0; border-radius: 5px;
+      padding: 6px 9px; font-size: 12px; outline: none; background: #fff;
+    }
+    input:focus, select:focus, textarea:focus { border-color: #4A90D9; }
+    textarea { height: 100px; resize: vertical; font-family: monospace; font-size: 11px; }
+
+    .sep-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+    .sep-btn {
+      border: 1px solid #cbd5e0; background: #fff;
+      padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+    .sep-btn.selected { background: #2C5282; color: #fff; border-color: #2C5282; }
+
+    .col-sel-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; }
+    .col-sel-row label { width: 140px; margin: 0; font-weight: 500; color: #444; }
+    .col-sel-row select, .col-sel-row input { width: 220px; }
+
+    .preview-map { overflow-x: auto; margin-bottom: 12px; border-radius: 5px; border: 1px solid #e2e8f0; }
+    .preview-map table { border-collapse: collapse; width: 100%; font-size: 11px; }
+    .preview-map th { background: #4A90D9; color: #fff; padding: 5px 8px; white-space: nowrap; }
+    .preview-map td { padding: 4px 8px; border-bottom: 1px solid #e2e8f0; }
+    .col-highlight { background: #FFF3CD !important; }
+
+    .table-wrap { overflow: auto; max-height: 280px; border-radius: 5px; border: 1px solid #e2e8f0; }
+    table { border-collapse: collapse; width: 100%; font-size: 11px; }
+    th { background: #2C5282; color: #fff; padding: 5px 8px; position: sticky; top: 0; }
+    td { padding: 4px 8px; border-bottom: 1px solid #e2e8f0; }
+    tr:nth-child(even) td { background: #EBF3FB; }
+    tr.dupe td { background: #FFF5F5 !important; }
+    .badge {
+      font-size: 10px; padding: 1px 5px; border-radius: 10px; margin-left: 4px;
+    }
+    .badge-dupe   { background: #fed7d7; color: #c53030; }
+    .badge-future { background: #fefcbf; color: #975a16; }
+
+    .summary-box {
+      background: #EBF3FB; border-left: 4px solid #4A90D9;
+      border-radius: 0 5px 5px 0; padding: 10px 14px;
+      font-size: 12px; margin-bottom: 12px; line-height: 1.7;
+    }
+    .summary-box strong { color: #2C5282; }
+
+    .footer {
+      background: #fff; border-top: 1px solid #e2e8f0;
+      padding: 10px 16px; display: flex; justify-content: flex-end;
+      align-items: center; gap: 8px;
+    }
+    .footer-info { flex: 1; font-size: 12px; color: #718096; }
+    button {
+      padding: 7px 16px; border-radius: 5px; border: none;
+      font-size: 13px; cursor: pointer; font-weight: 500;
+    }
+    .btn-sec { background: #e2e8f0; color: #4a5568; }
+    .btn-sec:hover { background: #cbd5e0; }
+    .btn-pri { background: #2C5282; color: #fff; }
+    .btn-pri:hover { background: #1a365d; }
+    .btn-pri:disabled { background: #a0aec0; cursor: not-allowed; }
+
+    .msg { padding: 8px 12px; border-radius: 5px; font-size: 12px; margin-bottom: 10px; }
+    .msg.success { background: #c6f6d5; color: #276749; }
+    .msg.error   { background: #fed7d7; color: #822727; }
+    .msg.info    { background: #bee3f8; color: #2a69ac; }
+    .hidden { display: none !important; }
+    a.sel-all { cursor: pointer; color: #4A90D9; text-decoration: underline; font-size: 11px; }
+  </style>
+</head>
+<body>
+
+<div class="steps">
+  <div class="step-tab active" id="tab1">① Coller tableau</div>
+  <div class="step-tab"        id="tab2">② Mapper colonnes</div>
+  <div class="step-tab"        id="tab3">③ Aperçu &amp; Import</div>
+</div>
+
+<!-- ────────────────────────────────────────────────────────────
+     ÉTAPE 1 : Coller / uploader le tableau
+     ──────────────────────────────────────────────────────────── -->
+<div class="content" id="step1">
+  <h3>🏦 Importer les intérêts depuis votre tableau d'amortissement</h3>
+
+  <div class="msg info">
+    Collez ici le tableau d'amortissement de votre banque (CSV ou copié depuis Excel/Calc).
+    Seules les colonnes <strong>Date</strong> et <strong>Intérêts</strong> sont nécessaires.
+    Les échéances futures sont automatiquement ignorées.
+  </div>
+
+  <div class="field">
+    <label>Contenu du tableau (CSV ou texte tabulé)</label>
+    <textarea id="csvText" placeholder="Collez ici le tableau d'amortissement…"></textarea>
+  </div>
+
+  <div class="field">
+    <label style="display:flex;align-items:center;gap:8px;">
+      <input type="file" id="csvFile" accept=".csv,.txt,.xls,.xlsx"
+             style="display:none" onchange="loadFile(this)">
+      <button type="button" class="btn-sec"
+              onclick="document.getElementById('csvFile').click()"
+              style="width:auto;padding:5px 12px;font-size:12px;">
+        📂 Uploader un fichier CSV
+      </button>
+      <span id="csvFileName" style="font-size:11px;color:#718096;font-style:italic;"></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label>Séparateur</label>
+    <div class="sep-btns">
+      <button type="button" class="sep-btn" id="sepPoint" onclick="setSep(';')">; (point-virgule)</button>
+      <button type="button" class="sep-btn" id="sepComma" onclick="setSep(',')">',  (virgule)</button>
+      <button type="button" class="sep-btn" id="sepTab"   onclick="setSep('\t')">⇥ (tabulation)</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Libellé à utiliser pour les entrées dans Comptabilité</label>
+    <input type="text" id="descPrefix" value="Intérêts crédit">
+  </div>
+</div>
+
+<!-- ────────────────────────────────────────────────────────────
+     ÉTAPE 2 : Mapping des colonnes
+     ──────────────────────────────────────────────────────────── -->
+<div class="content hidden" id="step2">
+  <h3>Indiquez quelle colonne correspond à chaque champ</h3>
+
+  <div class="preview-map" id="previewMap"></div>
+
+  <div class="col-sel-row">
+    <label>Colonne Date</label>
+    <select id="dateCol" onchange="highlightCols()"></select>
+  </div>
+  <div class="col-sel-row">
+    <label>Colonne Intérêts</label>
+    <select id="interetsCol" onchange="highlightCols()"></select>
+  </div>
+  <div class="col-sel-row">
+    <label>Ligne de début des données</label>
+    <select id="startRow">
+      <option value="1">Ligne 2 (1 ligne d'en-tête)</option>
+      <option value="2">Ligne 3 (2 lignes d'en-tête)</option>
+      <option value="0">Ligne 1 (pas d'en-tête)</option>
+    </select>
+  </div>
+
+  <p style="font-size:11px;color:#718096;margin-top:6px;">
+    💡 Les cellules surlignées en jaune correspondent aux colonnes sélectionnées.
+  </p>
+</div>
+
+<!-- ────────────────────────────────────────────────────────────
+     ÉTAPE 3 : Aperçu + import
+     ──────────────────────────────────────────────────────────── -->
+<div class="content hidden" id="step3">
+  <div class="summary-box" id="summaryBox"></div>
+  <div class="msg hidden" id="step3Msg"></div>
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+    <a class="sel-all" onclick="toggleAll()">Tout sélectionner / désélectionner</a>
+    <span id="selInfo" style="font-size:11px;color:#4A90D9;"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>✓</th>
+          <th>Date</th>
+          <th>Description</th>
+          <th>Intérêts (€)</th>
+        </tr>
+      </thead>
+      <tbody id="previewBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="footer">
+  <div class="footer-info" id="footerInfo"></div>
+  <button class="btn-sec" id="btnBack" onclick="goBack()" style="display:none">← Retour</button>
+  <button class="btn-pri" id="btnNext" onclick="goNext()">Suivant →</button>
+  <button class="btn-sec" onclick="google.script.host.close()">Fermer</button>
+</div>
+
+<script>
+  var currentStep  = 1;
+  var detectedSep  = ';';
+  var csvPreview   = [];
+  var parsedRows   = [];
+  var allChecked   = true;
+
+  // ─── Séparateur ────────────────────────────────────────────
+  function setSep(s) {
+    detectedSep = s;
+    ['sepPoint','sepComma','sepTab'].forEach(function(id) {
+      document.getElementById(id).classList.remove('selected');
+    });
+    if (s === ';')   document.getElementById('sepPoint').classList.add('selected');
+    if (s === ',')   document.getElementById('sepComma').classList.add('selected');
+    if (s === '\t')  document.getElementById('sepTab').classList.add('selected');
+  }
+  setSep(';');
+
+  function autoDetectSep(text) {
+    var line1 = (text || '').split('\n')[0] || '';
+    var counts = { ';': 0, ',': 0, '\t': 0 };
+    [';', ',', '\t'].forEach(function(c) {
+      counts[c] = (line1.match(new RegExp((c === '\t' ? '\\t' : '\\' + c), 'g')) || []).length;
+    });
+    var best = ';';
+    if (counts['\t'] > counts[best]) best = '\t';
+    else if (counts[','] > counts[best]) best = ',';
+    setSep(best);
+  }
+
+  function loadFile(input) {
+    if (!input.files || !input.files[0]) return;
+    document.getElementById('csvFileName').textContent = input.files[0].name;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      document.getElementById('csvText').value = e.target.result;
+      autoDetectSep(e.target.result);
+    };
+    reader.readAsText(input.files[0], 'UTF-8');
+  }
+
+  // ─── Navigation ────────────────────────────────────────────
+  function goNext() {
+    if (currentStep === 1) {
+      var text = document.getElementById('csvText').value.trim();
+      if (!text) { alert('Collez d\'abord le tableau d\'amortissement.'); return; }
+      loadStep2(text);
+    } else if (currentStep === 2) {
+      loadStep3();
+    } else if (currentStep === 3) {
+      doImport();
+    }
+  }
+
+  function goBack() {
+    if (currentStep === 2) showStep(1);
+    else if (currentStep === 3) showStep(2);
+  }
+
+  function showStep(n) {
+    currentStep = n;
+    ['step1','step2','step3'].forEach(function(id, i) {
+      document.getElementById(id).classList.toggle('hidden', i + 1 !== n);
+    });
+    ['tab1','tab2','tab3'].forEach(function(id, i) {
+      document.getElementById(id).classList.toggle('active', i + 1 === n);
+      document.getElementById(id).classList.toggle('done', i + 1 < n);
+    });
+    document.getElementById('btnBack').style.display = (n > 1) ? '' : 'none';
+    document.getElementById('btnNext').textContent   = (n === 3) ? '⬇ Importer' : 'Suivant →';
+    document.getElementById('footerInfo').textContent = '';
+  }
+
+  // ─── Étape 2 ───────────────────────────────────────────────
+  function loadStep2(text) {
+    google.script.run
+      .withSuccessHandler(function(preview) {
+        csvPreview = preview;
+        buildPreviewMap(preview);
+        buildColSelectors(preview[0] || []);
+        showStep(2);
+        highlightCols();
+      })
+      .withFailureHandler(function(e) { alert('Erreur : ' + e.message); })
+      .previewAmortissement(text, detectedSep);
+  }
+
+  function buildPreviewMap(preview) {
+    if (!preview || !preview.length) return;
+    var html = '<table id="pvTable"><thead><tr>';
+    preview[0].forEach(function(h, ci) {
+      html += '<th id="pvh_' + ci + '">Col ' + ci + (h ? '<br><small>' + esc(h) + '</small>' : '') + '</th>';
+    });
+    html += '</tr></thead><tbody>';
+    for (var ri = 1; ri < preview.length; ri++) {
+      html += '<tr>';
+      preview[ri].forEach(function(cell, ci) {
+        html += '<td id="pvd_' + ri + '_' + ci + '">' + esc(cell) + '</td>';
+      });
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    document.getElementById('previewMap').innerHTML = html;
+  }
+
+  function buildColSelectors(headerRow) {
+    // Heuristique : trouver date / intérêts
+    var defaultDate = 0, defaultInt = -1;
+    headerRow.forEach(function(h, i) {
+      var hl = h.toLowerCase();
+      if (/date|ech/.test(hl))                     defaultDate = i;
+      if (/int.r|interet|interest/.test(hl))       defaultInt  = i;
+    });
+    if (defaultInt === -1) {
+      // Fallback : dernier avant la dernière colonne (souvent capital, intérêts, mensualité)
+      defaultInt = Math.max(1, headerRow.length - 2);
+    }
+
+    ['dateCol', 'interetsCol'].forEach(function(id, idx) {
+      var sel = document.getElementById(id);
+      sel.innerHTML = '';
+      for (var i = 0; i < Math.max(headerRow.length, 6); i++) {
+        var o = document.createElement('option');
+        o.value = i;
+        o.textContent = 'Col ' + i + (headerRow[i] ? ' — ' + headerRow[i] : '');
+        sel.appendChild(o);
+      }
+      sel.value = (id === 'dateCol') ? defaultDate : defaultInt;
+    });
+  }
+
+  function highlightCols() {
+    // Supprimer anciens highlights
+    document.querySelectorAll('.col-highlight').forEach(function(el) {
+      el.classList.remove('col-highlight');
+    });
+    var dc = parseInt(document.getElementById('dateCol').value, 10);
+    var ic = parseInt(document.getElementById('interetsCol').value, 10);
+
+    [dc, ic].forEach(function(ci) {
+      var th = document.getElementById('pvh_' + ci);
+      if (th) th.classList.add('col-highlight');
+      for (var ri = 1; ri < csvPreview.length; ri++) {
+        var td = document.getElementById('pvd_' + ri + '_' + ci);
+        if (td) td.classList.add('col-highlight');
+      }
+    });
+  }
+
+  // ─── Étape 3 ───────────────────────────────────────────────
+  function loadStep3() {
+    var text = document.getElementById('csvText').value.trim();
+    var mapping = {
+      separator:   detectedSep,
+      dateCol:     document.getElementById('dateCol').value,
+      interetsCol: document.getElementById('interetsCol').value,
+      startRow:    document.getElementById('startRow').value,
+      descPrefix:  document.getElementById('descPrefix').value || 'Intérêts crédit'
+    };
+
+    document.getElementById('btnNext').disabled = true;
+    document.getElementById('footerInfo').textContent = '⏳ Analyse en cours…';
+
+    google.script.run
+      .withSuccessHandler(function(result) {
+        parsedRows = result.rows;
+        buildPreviewTable(result);
+        showStep(3);
+        document.getElementById('btnNext').disabled = false;
+      })
+      .withFailureHandler(function(e) {
+        document.getElementById('btnNext').disabled = false;
+        document.getElementById('footerInfo').textContent = '';
+        alert('Erreur : ' + e.message);
+      })
+      .parseAmortissementCSV(text, mapping);
+  }
+
+  function buildPreviewTable(result) {
+    var rows = result.rows;
+    // Résumé
+    var totalInterets = rows.reduce(function(s, r) { return s + r.interets; }, 0);
+    var summary = '<strong>' + rows.length + '</strong> échéance(s) passée(s) trouvée(s)';
+    if (result.futureCount > 0)
+      summary += ' — <strong>' + result.futureCount + '</strong> future(s) ignorée(s)';
+    if (result.dupeCount > 0)
+      summary += ' — <strong>' + result.dupeCount + '</strong> doublon(s) pré-décochés';
+    summary += '<br>Total intérêts à importer : <strong>' + totalInterets.toFixed(2) + ' €</strong>';
+    document.getElementById('summaryBox').innerHTML = summary;
+
+    var tbody = document.getElementById('previewBody');
+    tbody.innerHTML = '';
+
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:20px;color:#718096;">'
+                      + 'Aucune échéance passée trouvée. Vérifiez le mapping des colonnes.</td></tr>';
+      return;
+    }
+
+    rows.forEach(function(r, i) {
+      var tr = document.createElement('tr');
+      if (r.isDupe) tr.className = 'dupe';
+
+      // Checkbox
+      var tdChk = document.createElement('td');
+      var chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.id   = 'chk_' + i;
+      chk.checked = !r.isDupe;
+      chk.onchange = updateSelInfo;
+      tdChk.appendChild(chk);
+      tr.appendChild(tdChk);
+
+      // Date
+      var tdDate = document.createElement('td');
+      tdDate.textContent = r.date;
+      if (r.isDupe) {
+        var badge = document.createElement('span');
+        badge.className = 'badge badge-dupe';
+        badge.textContent = 'doublon?';
+        tdDate.appendChild(badge);
+      }
+      tr.appendChild(tdDate);
+
+      // Description
+      tr.appendChild(tdTxt(r.description));
+      // Intérêts
+      tr.appendChild(tdTxt(r.interets.toFixed(2) + ' €'));
+
+      tbody.appendChild(tr);
+    });
+
+    updateSelInfo();
+  }
+
+  function tdTxt(t) {
+    var td = document.createElement('td');
+    td.textContent = t;
+    return td;
+  }
+
+  function updateSelInfo() {
+    var n = 0, total = 0;
+    parsedRows.forEach(function(r, i) {
+      var chk = document.getElementById('chk_' + i);
+      if (chk && chk.checked) { n++; total += r.interets; }
+    });
+    document.getElementById('selInfo').textContent =
+      n + ' ligne(s) — ' + total.toFixed(2) + ' € à importer';
+  }
+
+  function toggleAll() {
+    allChecked = !allChecked;
+    parsedRows.forEach(function(_, i) {
+      var chk = document.getElementById('chk_' + i);
+      if (chk) chk.checked = allChecked;
+    });
+    updateSelInfo();
+  }
+
+  // ─── Import final ──────────────────────────────────────────
+  function doImport() {
+    var toImport = [];
+    parsedRows.forEach(function(r, i) {
+      var chk = document.getElementById('chk_' + i);
+      if (chk && chk.checked) {
+        toImport.push({ dateISO: r.dateISO, description: r.description, interets: r.interets });
+      }
+    });
+
+    if (!toImport.length) { alert('Aucune ligne sélectionnée.'); return; }
+
+    document.getElementById('btnNext').disabled = true;
+    document.getElementById('footerInfo').textContent = '⏳ Import en cours…';
+
+    google.script.run
+      .withSuccessHandler(function(count) {
+        document.getElementById('btnNext').disabled = false;
+        document.getElementById('footerInfo').textContent = '';
+        showMsg('success',
+          '✅ ' + count + ' ligne(s) importée(s) dans Comptabilité (catégorie "Intérêts d\'emprunt").');
+        // Décocher tout
+        parsedRows.forEach(function(_, i) {
+          var chk = document.getElementById('chk_' + i);
+          if (chk) chk.checked = false;
+        });
+        updateSelInfo();
+      })
+      .withFailureHandler(function(e) {
+        document.getElementById('btnNext').disabled = false;
+        document.getElementById('footerInfo').textContent = '';
+        showMsg('error', '❌ ' + e.message);
+      })
+      .importerInteretsCredit(toImport);
+  }
+
+  function showMsg(type, text) {
+    var el = document.getElementById('step3Msg');
+    el.className = 'msg ' + type;
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+
+  function esc(s) {
+    return (s || '').toString()
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>

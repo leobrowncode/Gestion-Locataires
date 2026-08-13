@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Google Sans', Arial, sans-serif;
+      font-size: 13px;
+      color: #333;
+      background: #f8f9fa;
+      padding: 0;
+      height: 100%;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    /* Navigation par étapes */
+    .steps {
+      display: flex;
+      background: #2C5282;
+      padding: 10px 16px 0;
+      gap: 4px;
+    }
+    .step-tab {
+      padding: 7px 14px 7px;
+      color: rgba(255,255,255,0.6);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: default;
+      border-radius: 5px 5px 0 0;
+    }
+    .step-tab.active {
+      background: #f8f9fa;
+      color: #2C5282;
+      font-weight: 700;
+    }
+    .step-tab.done { color: rgba(255,255,255,0.85); }
+
+    /* Contenu */
+    .content { flex: 1; overflow-y: auto; padding: 16px; }
+
+    h3 { font-size: 13px; font-weight: 700; color: #2C5282; margin-bottom: 10px; }
+
+    .field { margin-bottom: 10px; }
+    label { display: block; font-weight: 600; margin-bottom: 3px; font-size: 12px; color: #444; }
+    input[type=text], select, textarea {
+      width: 100%; border: 1px solid #cbd5e0; border-radius: 5px;
+      padding: 6px 9px; font-size: 12px; outline: none; background: #fff;
+    }
+    input:focus, select:focus, textarea:focus { border-color: #4A90D9; }
+    textarea { height: 100px; resize: vertical; font-family: monospace; font-size: 11px; }
+
+    .row2 { display: flex; gap: 10px; }
+    .row2 .field { flex: 1; }
+
+    .sep-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+    .sep-btn {
+      border: 1px solid #cbd5e0; background: #fff; padding: 4px 10px;
+      border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+    .sep-btn.selected { background: #2C5282; color: #fff; border-color: #2C5282; }
+
+    /* Tableau aperçu */
+    .table-wrap { overflow-x: auto; max-height: 280px; overflow-y: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 11px; }
+    th {
+      background: #2C5282; color: #fff; padding: 5px 7px;
+      text-align: left; position: sticky; top: 0; white-space: nowrap;
+    }
+    td { padding: 4px 7px; border-bottom: 1px solid #e2e8f0; vertical-align: middle; }
+    tr:nth-child(even) td { background: #EBF3FB; }
+    tr.dupe td { background: #FFF5F5 !important; color: #c53030; }
+    .dupe-badge {
+      font-size: 10px; background: #fed7d7; color: #c53030;
+      padding: 1px 5px; border-radius: 10px; margin-left: 4px;
+    }
+    select.cat-sel { font-size: 11px; padding: 2px 4px; }
+    input.ch-sel { font-size: 11px; padding: 2px 4px; width: 60px; }
+    input[type=checkbox] { cursor: pointer; }
+
+    /* Barre inférieure */
+    .footer {
+      background: #fff;
+      border-top: 1px solid #e2e8f0;
+      padding: 10px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .footer-info { font-size: 12px; color: #718096; flex: 1; }
+    button {
+      padding: 7px 16px; border-radius: 5px; border: none;
+      font-size: 13px; cursor: pointer; font-weight: 500;
+    }
+    .btn-sec { background: #e2e8f0; color: #4a5568; }
+    .btn-sec:hover { background: #cbd5e0; }
+    .btn-pri { background: #2C5282; color: #fff; }
+    .btn-pri:hover { background: #1a365d; }
+    .btn-pri:disabled { background: #a0aec0; cursor: not-allowed; }
+
+    .msg { padding: 8px 12px; border-radius: 5px; font-size: 12px; margin-bottom: 10px; }
+    .msg.success { background: #c6f6d5; color: #276749; }
+    .msg.error   { background: #fed7d7; color: #822727; }
+    .msg.info    { background: #bee3f8; color: #2a69ac; }
+
+    .hidden { display: none !important; }
+
+    /* Mapping colonnes */
+    .preview-map { overflow-x: auto; margin-bottom: 12px; }
+    .preview-map table th, .preview-map table td {
+      padding: 4px 8px; font-size: 11px;
+    }
+    .col-selector { display: flex; flex-direction: column; gap: 6px; }
+    .col-sel-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .col-sel-row label { width: 90px; margin: 0; font-weight: 500; }
+    .col-sel-row select { width: 180px; }
+
+    /* Compteurs sélection */
+    .sel-info { font-size: 11px; color: #4A90D9; margin-bottom: 6px; }
+    a.sel-all { cursor: pointer; color: #4A90D9; text-decoration: underline; font-size: 11px; }
+  </style>
+</head>
+<body>
+
+<!-- Étapes -->
+<div class="steps">
+  <div class="step-tab active" id="tab1">① Coller CSV</div>
+  <div class="step-tab" id="tab2">② Configurer</div>
+  <div class="step-tab" id="tab3">③ Aperçu &amp; Import</div>
+</div>
+
+<!-- ====================================================
+     ÉTAPE 1 : Coller / uploader le CSV
+     ==================================================== -->
+<div class="content" id="step1">
+  <h3>Collez le contenu de votre relevé bancaire (CSV)</h3>
+
+  <div class="msg info" id="step1Info">
+    Exportez votre relevé depuis votre banque en format CSV, copiez-collez le contenu ici.
+    Ou uploadez directement le fichier .csv.
+  </div>
+
+  <div class="field">
+    <label>Contenu CSV</label>
+    <textarea id="csvText" placeholder="Collez ici le contenu de votre fichier CSV…"></textarea>
+  </div>
+
+  <div class="field">
+    <label style="display:flex;align-items:center;gap:8px;">
+      <input type="file" id="csvFile" accept=".csv,.txt" style="display:none"
+             onchange="loadCSVFile(this)">
+      <button type="button" class="btn-sec" onclick="document.getElementById('csvFile').click()"
+              style="width:auto;padding:5px 12px;font-size:12px;">
+        📂 Uploader un fichier .csv
+      </button>
+      <span id="csvFileName" style="font-size:11px;color:#718096;font-style:italic;"></span>
+    </label>
+  </div>
+
+  <div class="field">
+    <label>Séparateur détecté</label>
+    <div class="sep-btns">
+      <button type="button" class="sep-btn" id="sepPoint" onclick="setSep(';')">; (point-virgule)</button>
+      <button type="button" class="sep-btn" id="sepComma" onclick="setSep(',')">',  (virgule)</button>
+      <button type="button" class="sep-btn" id="sepTab"   onclick="setSep('\t')">⇥ (tabulation)</button>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================
+     ÉTAPE 2 : Mapping des colonnes
+     ==================================================== -->
+<div class="content hidden" id="step2">
+  <h3>Indiquez quelle colonne correspond à chaque champ</h3>
+
+  <p style="font-size:11px;color:#718096;margin-bottom:10px;">
+    Aperçu des premières lignes de votre CSV :
+  </p>
+  <div class="preview-map" id="previewMap"></div>
+
+  <div class="col-selector" id="colSelector">
+    <div class="col-sel-row">
+      <label>Date</label>
+      <select id="dateCol"></select>
+    </div>
+    <div class="col-sel-row">
+      <label>Description</label>
+      <select id="descCol"></select>
+    </div>
+    <div class="col-sel-row">
+      <label>Montant</label>
+      <select id="montantCol"></select>
+    </div>
+    <div class="col-sel-row" style="margin-top:8px;">
+      <label>Ligne de début</label>
+      <select id="startRow">
+        <option value="1">Ligne 2 (ignorer 1 ligne d'en-tête)</option>
+        <option value="2">Ligne 3 (ignorer 2 lignes)</option>
+        <option value="0">Ligne 1 (pas d'en-tête)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================
+     ÉTAPE 3 : Aperçu + import
+     ==================================================== -->
+<div class="content hidden" id="step3">
+  <div class="sel-info" id="selInfo"></div>
+  <a class="sel-all" onclick="toggleAll()">Tout sélectionner / désélectionner</a>
+  <div class="msg hidden" id="step3Msg"></div>
+  <div class="table-wrap" id="tableWrap">
+    <table id="previewTable">
+      <thead>
+        <tr>
+          <th>✓</th>
+          <th>Date</th>
+          <th>Description</th>
+          <th>Montant</th>
+          <th>Catégorie</th>
+          <th>Chambre</th>
+        </tr>
+      </thead>
+      <tbody id="previewBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  <div class="footer-info" id="footerInfo"></div>
+  <button class="btn-sec" id="btnBack" onclick="goBack()" style="display:none">← Retour</button>
+  <button class="btn-pri" id="btnNext" onclick="goNext()">Suivant →</button>
+  <button class="btn-sec" onclick="google.script.host.close()">Fermer</button>
+</div>
+
+<script>
+  var currentStep = 1;
+  var detectedSep = ';';
+  var parsedRows  = [];
+  var categories  = [];
+  var csvPreview  = [];
+
+  // Charger les catégories
+  google.script.run.withSuccessHandler(function(c) { categories = c; }).getCategoriesList();
+
+  // ----------------------------------------------------------------
+  // Chargement fichier CSV
+  // ----------------------------------------------------------------
+  function loadCSVFile(input) {
+    if (!input.files || !input.files[0]) return;
+    var f = input.files[0];
+    document.getElementById('csvFileName').textContent = f.name;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      document.getElementById('csvText').value = e.target.result;
+      autoDetectSep(e.target.result);
+    };
+    reader.readAsText(f, 'UTF-8');
+  }
+
+  function autoDetectSep(text) {
+    var line1 = (text || '').split('\n')[0] || '';
+    var counts = { ';': 0, ',': 0, '\t': 0 };
+    for (var c in counts) counts[c] = (line1.match(new RegExp('\\' + (c === '\t' ? 't' : c), 'g')) || []).length;
+    var best = ';';
+    if (counts[','] > counts[best]) best = ',';
+    if (counts['\t'] > counts[best]) best = '\t';
+    setSep(best);
+  }
+
+  function setSep(s) {
+    detectedSep = s;
+    ['sepPoint','sepComma','sepTab'].forEach(function(id) {
+      document.getElementById(id).classList.remove('selected');
+    });
+    if (s === ';')   document.getElementById('sepPoint').classList.add('selected');
+    if (s === ',')   document.getElementById('sepComma').classList.add('selected');
+    if (s === '\t')  document.getElementById('sepTab').classList.add('selected');
+  }
+  setSep(';');
+
+  // ----------------------------------------------------------------
+  // Navigation étapes
+  // ----------------------------------------------------------------
+  function goNext() {
+    if (currentStep === 1) {
+      var text = document.getElementById('csvText').value.trim();
+      if (!text) { alert('Collez d\'abord le contenu CSV.'); return; }
+      if (!detectedSep) { alert('Choisissez un séparateur.'); return; }
+      loadStep2(text);
+    } else if (currentStep === 2) {
+      loadStep3();
+    } else if (currentStep === 3) {
+      importSelected();
+    }
+  }
+
+  function goBack() {
+    if (currentStep === 2) showStep(1);
+    else if (currentStep === 3) showStep(2);
+  }
+
+  function showStep(n) {
+    currentStep = n;
+    ['step1','step2','step3'].forEach(function(id, i) {
+      document.getElementById(id).classList.toggle('hidden', i + 1 !== n);
+    });
+    ['tab1','tab2','tab3'].forEach(function(id, i) {
+      var el = document.getElementById(id);
+      el.classList.toggle('active', i + 1 === n);
+      el.classList.toggle('done', i + 1 < n);
+    });
+    document.getElementById('btnBack').style.display = (n > 1) ? '' : 'none';
+    document.getElementById('btnNext').textContent =
+      n === 3 ? '⬇ Importer les lignes cochées' : 'Suivant →';
+    document.getElementById('footerInfo').textContent = '';
+  }
+
+  // ----------------------------------------------------------------
+  // Étape 2 : mapping colonnes
+  // ----------------------------------------------------------------
+  function loadStep2(text) {
+    google.script.run
+      .withSuccessHandler(function(preview) {
+        csvPreview = preview;
+        buildPreviewMap(preview);
+        buildColSelectors(preview[0] || []);
+        showStep(2);
+      })
+      .withFailureHandler(function(e) { alert('Erreur : ' + e.message); })
+      .previewCSV(text, detectedSep);
+  }
+
+  function buildPreviewMap(preview) {
+    if (!preview || !preview.length) return;
+    var html = '<table style="border-collapse:collapse;">';
+    preview.forEach(function(row, ri) {
+      html += '<tr>';
+      row.forEach(function(cell, ci) {
+        if (ri === 0) {
+          html += '<th style="background:#4A90D9;color:#fff;padding:4px 8px;font-size:11px;border:1px solid #cbd5e0;">'
+                + 'Col ' + ci + (cell ? '<br><span style="font-weight:400;">' + esc(cell) + '</span>' : '')
+                + '</th>';
+        } else {
+          html += '<td style="padding:3px 8px;font-size:11px;border:1px solid #e2e8f0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+                + esc(cell) + '</td>';
+        }
+      });
+      html += '</tr>';
+    });
+    html += '</table>';
+    document.getElementById('previewMap').innerHTML = html;
+  }
+
+  function buildColSelectors(headerRow) {
+    var ids = ['dateCol','descCol','montantCol'];
+    var defaults = [0, 1, 2];
+    // Heuristique : chercher "date", "libell", "montant", "debit", "credit"
+    if (headerRow.length) {
+      headerRow.forEach(function(h, i) {
+        var hl = h.toLowerCase();
+        if (/date/.test(hl)) defaults[0] = i;
+        if (/libell|label|description|d.signation/.test(hl)) defaults[1] = i;
+        if (/montant|debit|d.bit|credit|amount/.test(hl)) defaults[2] = i;
+      });
+    }
+    ids.forEach(function(id, idx) {
+      var sel = document.getElementById(id);
+      sel.innerHTML = '';
+      for (var i = 0; i < Math.max(headerRow.length, 5); i++) {
+        var o = document.createElement('option');
+        o.value = i;
+        o.textContent = 'Colonne ' + i + (headerRow[i] ? ' — ' + headerRow[i] : '');
+        sel.appendChild(o);
+      }
+      sel.value = defaults[idx];
+    });
+  }
+
+  // ----------------------------------------------------------------
+  // Étape 3 : aperçu parsé
+  // ----------------------------------------------------------------
+  function loadStep3() {
+    var text = document.getElementById('csvText').value.trim();
+    var mapping = {
+      separator:  detectedSep,
+      dateCol:    document.getElementById('dateCol').value,
+      descCol:    document.getElementById('descCol').value,
+      montantCol: document.getElementById('montantCol').value,
+      startRow:   document.getElementById('startRow').value
+    };
+
+    document.getElementById('btnNext').disabled = true;
+    document.getElementById('footerInfo').textContent = '⏳ Analyse en cours…';
+
+    google.script.run
+      .withSuccessHandler(function(result) {
+        parsedRows = result.rows;
+        buildPreviewTable(parsedRows, result.dupeCount);
+        showStep(3);
+        document.getElementById('btnNext').disabled = false;
+        updateSelInfo();
+        if (result.dupeCount > 0) {
+          showStep3Msg('info', result.dupeCount + ' doublon(s) détecté(s) et pré-décochés.');
+        }
+      })
+      .withFailureHandler(function(e) {
+        document.getElementById('footerInfo').textContent = '';
+        document.getElementById('btnNext').disabled = false;
+        alert('Erreur lors de l\'analyse : ' + e.message);
+      })
+      .parseCSVBanque(text, mapping);
+  }
+
+  function buildPreviewTable(rows, dupeCount) {
+    var tbody = document.getElementById('previewBody');
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#718096;padding:20px;">Aucune ligne parsée. Vérifiez le mapping de colonnes.</td></tr>';
+      return;
+    }
+
+    rows.forEach(function(r, i) {
+      var tr = document.createElement('tr');
+      if (r.isDupe) tr.className = 'dupe';
+
+      // Checkbox
+      var tdChk = document.createElement('td');
+      var chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.id = 'chk_' + i;
+      chk.checked = !r.isDupe;
+      chk.onchange = updateSelInfo;
+      tdChk.appendChild(chk);
+      tr.appendChild(tdChk);
+
+      // Date
+      tr.appendChild(tdText(r.date + (r.isDupe ? '<span class="dupe-badge">doublon?</span>' : '')));
+      // Description
+      tr.appendChild(tdText(r.description));
+      // Montant
+      tr.appendChild(tdText(r.montant.toFixed(2) + ' €'));
+
+      // Catégorie (select éditable)
+      var tdCat = document.createElement('td');
+      var selCat = document.createElement('select');
+      selCat.className = 'cat-sel';
+      selCat.id = 'cat_' + i;
+      selCat.innerHTML = '<option value="">— Choisir —</option>';
+      categories.forEach(function(c) {
+        var o = document.createElement('option');
+        o.value = c; o.textContent = c;
+        if (c === r.categorie) o.selected = true;
+        selCat.appendChild(o);
+      });
+      tdCat.appendChild(selCat);
+      tr.appendChild(tdCat);
+
+      // Chambre (input court)
+      var tdCh = document.createElement('td');
+      var inpCh = document.createElement('input');
+      inpCh.type = 'text';
+      inpCh.className = 'ch-sel';
+      inpCh.id = 'ch_' + i;
+      inpCh.placeholder = '1/2/3';
+      inpCh.maxLength = 6;
+      tdCh.appendChild(inpCh);
+      tr.appendChild(tdCh);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  function tdText(html) {
+    var td = document.createElement('td');
+    td.innerHTML = html;
+    return td;
+  }
+
+  function updateSelInfo() {
+    var total = parsedRows.length, checked = 0;
+    for (var i = 0; i < total; i++) {
+      var chk = document.getElementById('chk_' + i);
+      if (chk && chk.checked) checked++;
+    }
+    document.getElementById('selInfo').textContent =
+      checked + ' / ' + total + ' lignes sélectionnées pour import';
+  }
+
+  var allChecked = true;
+  function toggleAll() {
+    allChecked = !allChecked;
+    for (var i = 0; i < parsedRows.length; i++) {
+      var chk = document.getElementById('chk_' + i);
+      if (chk) chk.checked = allChecked;
+    }
+    updateSelInfo();
+  }
+
+  function showStep3Msg(type, text) {
+    var el = document.getElementById('step3Msg');
+    el.className = 'msg ' + type;
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+
+  // ----------------------------------------------------------------
+  // Import final
+  // ----------------------------------------------------------------
+  function importSelected() {
+    var toImport = [];
+    for (var i = 0; i < parsedRows.length; i++) {
+      var chk = document.getElementById('chk_' + i);
+      if (!chk || !chk.checked) continue;
+      var r = parsedRows[i];
+      toImport.push({
+        dateISO:     r.dateISO,
+        description: r.description,
+        montant:     r.montant,
+        categorie:   document.getElementById('cat_' + i).value || 'Frais divers',
+        chambre:     document.getElementById('ch_' + i).value.trim()
+      });
+    }
+
+    if (!toImport.length) { alert('Aucune ligne sélectionnée.'); return; }
+
+    document.getElementById('btnNext').disabled = true;
+    document.getElementById('footerInfo').textContent = '⏳ Import en cours…';
+
+    google.script.run
+      .withSuccessHandler(function(count) {
+        document.getElementById('btnNext').disabled = false;
+        document.getElementById('footerInfo').textContent = '';
+        showStep3Msg('success', '✅ ' + count + ' charge(s) importée(s) avec succès dans l\'onglet Comptabilité.');
+        // Décocher les lignes importées
+        for (var i = 0; i < parsedRows.length; i++) {
+          var chk = document.getElementById('chk_' + i);
+          if (chk) chk.checked = false;
+        }
+        updateSelInfo();
+      })
+      .withFailureHandler(function(e) {
+        document.getElementById('btnNext').disabled = false;
+        document.getElementById('footerInfo').textContent = '';
+        showStep3Msg('error', '❌ Erreur : ' + e.message);
+      })
+      .importerLignesCSV(toImport);
+  }
+
+  // ----------------------------------------------------------------
+  // Utilitaire
+  // ----------------------------------------------------------------
+  function esc(s) {
+    return (s || '').toString()
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Système
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Apps Script / clasp — .clasp.json contient le scriptId du projet
+.clasp.json
+.clasprc.json
+node_modules/
+
+# Documents de travail (les modèles vivent sur Drive, pas dans le repo)
+*.docx
+~$*
+
+# Éditeurs
+.idea/
+.vscode/
+*.log
