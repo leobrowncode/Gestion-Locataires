@@ -1,0 +1,13 @@
+# Fichiers à NE PAS pousser dans le projet Apps Script (clasp push).
+# Sans ce fichier, clasp enverrait tests/*.js comme des fichiers .gs.
+**/**
+!Code.gs
+!Code_Compta.gs
+!WebApp.gs
+!Documenso.gs
+!Signature.gs
+!Mobile.html
+!Compta_Form.html
+!Compta_CSV.html
+!Compta_Amort.html
+!appsscript.json
