@@ -219,11 +219,40 @@ function webGetMeta() {
 // Chaque fonction lève une Error en cas d'échec, ou retourne {ok, message}.
 // ---------------------------------------------------------------------------
 
-function webGenererBail(row, force) {
+/**
+ * Refus structuré quand régénérer écraserait un document rattaché à une
+ * signature électronique, `null` si la voie est libre.
+ *
+ * Le client affiche le message et rappelle la même fonction avec
+ * `confirmerSignature = true` si l'utilisateur assume la perte.
+ *
+ * @param {Object} tenant
+ * @param {Array<string>} typesDoc — `'BAIL'` et/ou `'EDL'`, ceux réellement régénérés.
+ * @param {boolean} confirmerSignature
+ * @return {Object|null}
+ */
+function webBlocageSignature(tenant, typesDoc, confirmerSignature) {
+  if (confirmerSignature === true) return null;
+  if (typeof signatureBlocageRegeneration !== 'function') return null;
+  var messages = typesDoc
+    .map(function(t) { return signatureBlocageRegeneration(tenant, t); })
+    .filter(function(m) { return !!m; });
+  if (!messages.length) return null;
+  return {
+    ok: false,
+    confirmationRequise: true,
+    message: '⚠️ ' + messages.join('\n\n')
+  };
+}
+
+function webGenererBail(row, force, confirmerSignature) {
   var tenant = getTenantByRow(row);
   if (!force && (tenant['ID_PDF_BAIL'] || '').toString().trim()) {
     throw new Error('Bail déjà généré (ID_PDF_BAIL renseigné). Régénération annulée — utilisez « Régénérer » pour écraser.');
   }
+  var blocage = webBlocageSignature(tenant, ['BAIL'], confirmerSignature);
+  if (blocage) return blocage;
+
   var config = getConfig();
   var chambre = getChambreData(tenant['Chambre']);
   var result = generateLeaseDoc(tenant, config, chambre);
@@ -231,11 +260,14 @@ function webGenererBail(row, force) {
   return { ok: true, message: '✅ Bail généré\n' + result.pdfFile.getName() };
 }
 
-function webGenererEDL(row, force) {
+function webGenererEDL(row, force, confirmerSignature) {
   var tenant = getTenantByRow(row);
   if (!force && (tenant['ID_PDF_EDL'] || '').toString().trim()) {
     throw new Error('EDL déjà généré (ID_PDF_EDL renseigné). Régénération annulée — utilisez « Régénérer » pour écraser.');
   }
+  var blocage = webBlocageSignature(tenant, ['EDL'], confirmerSignature);
+  if (blocage) return blocage;
+
   var config = getConfig();
   var result = generateEDL(tenant, config);
   updateTenantCell(tenant._sheet, tenant._rowIndex, 'ID_PDF_EDL', result.pdfFile.getId());
@@ -243,13 +275,21 @@ function webGenererEDL(row, force) {
   return { ok: true, message: '✅ EDL généré\n' + result.pdfFile.getName() };
 }
 
-function webGenererBailEtEDL(row, force) {
+function webGenererBailEtEDL(row, force, confirmerSignature) {
   var tenant = getTenantByRow(row);
   var config = getConfig();
   var chambre = getChambreData(tenant['Chambre']);
 
   var bailExiste = !!(tenant['ID_PDF_BAIL'] || '').toString().trim();
   var edlExiste = !!(tenant['ID_PDF_EDL'] || '').toString().trim();
+
+  // Le garde-fou ne porte que sur les documents réellement régénérés : sans
+  // force, les pièces déjà là sont conservées et ne risquent rien.
+  var regeneres = [];
+  if (!bailExiste || force) regeneres.push('BAIL');
+  if (!edlExiste || force) regeneres.push('EDL');
+  var blocage = webBlocageSignature(tenant, regeneres, confirmerSignature);
+  if (blocage) return blocage;
 
   // Sans force : ne (re)génère que les pièces manquantes, signale les existantes
   var lignes = [];

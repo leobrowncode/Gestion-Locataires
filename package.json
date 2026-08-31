@@ -1,0 +1,15 @@
+{
+  "name": "gestion-locataires",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gestion locative meublée (LMNP) sur Google Sheets + Apps Script — outillage de test hors ligne",
+  "scripts": {
+    "test": "node tests/run.js",
+    "lint": "node tests/lint.js",
+    "check": "npm run lint && npm test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}

@@ -46,6 +46,10 @@ function onOpen() {
     .addSeparator()
     .addItem('🛡️ Envoyer attestation d\'assurance', 'menuEnvoyerAttestationAssurance')
     .addSeparator()
+    .addItem('✍️ Envoyer en signature (Documenso)', 'menuEnvoyerEnSignature')
+    .addItem('🔄 Actualiser les statuts de signature', 'menuActualiserStatutsSignature')
+    .addItem('🚫 Annuler une demande de signature', 'menuAnnulerSignature')
+    .addSeparator()
     .addItem('📩 Répondre au préavis (consignes ménage)', 'menuRepondrePreavis')
     .addItem('📧 Envoyer l\'EDL à l\'ami (Word + PDF)', 'menuEnvoyerEDLAmi')
     .addItem('🗂️ Archiver les dossiers inactifs (→ OLD)', 'menuArchiverDossiersInactifs')
@@ -351,6 +355,14 @@ function formatEuro(val) {
 
 /**
  * Duplique le modèle de bail, remplace les variables, enregistre en PDF.
+ *
+ * Le Google Doc de travail est CONSERVÉ (comme celui de l'état des lieux) et
+ * son identifiant écrit dans la colonne ID_DOC_BAIL : c'est lui que la
+ * signature électronique copie pour produire le PDF à signer. Sans lui, il
+ * faudrait régénérer le bail depuis le modèle au moment de la signature, au
+ * risque d'envoyer à la signature un document différent de celui déjà transmis
+ * au locataire.
+ *
  * @param {Object} tenant — Données locataire.
  * @param {Object} config — Données config.
  * @param {Object} chambre — Données chambre.
@@ -382,11 +394,14 @@ function generateLeaseDoc(tenant, config, chambre) {
 
   doc.saveAndClose();
 
-  // Générer le PDF et supprimer la copie Google Docs
+  // Générer le PDF. Le Google Doc reste disponible pour la signature
+  // électronique ; son identifiant est mémorisé si la colonne existe.
   var pdfFile = createLeasePdf(docId, docName, folder);
-  DriveApp.getFileById(docId).setTrashed(true);
+  if (tenant._sheet && tenant._rowIndex) {
+    updateTenantCellIfExists(tenant._sheet, tenant._rowIndex, 'ID_DOC_BAIL', docId);
+  }
 
-  return { pdfFile: pdfFile };
+  return { docId: docId, pdfFile: pdfFile };
 }
 
 /**
@@ -1140,6 +1155,33 @@ function createDossierLocationDraft(tenant, config, chambre) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Confirmation supplémentaire quand régénérer écraserait le Google Doc de
+ * travail rattaché à une signature électronique.
+ *
+ * @param {Object} ui — SpreadsheetApp.getUi().
+ * @param {Object} tenant
+ * @param {Array<string>} typesDoc — `'BAIL'` et/ou `'EDL'`.
+ * @return {boolean} true si la génération peut se poursuivre.
+ */
+function confirmerRegenerationSignature(ui, tenant, typesDoc) {
+  if (typeof signatureBlocageRegeneration !== 'function') return true;
+
+  var messages = [];
+  for (var i = 0; i < typesDoc.length; i++) {
+    var message = signatureBlocageRegeneration(tenant, typesDoc[i]);
+    if (message) messages.push(message);
+  }
+  if (!messages.length) return true;
+
+  return ui.alert(
+    'Signature électronique en jeu',
+    messages.join('\n\n') + '\n\nRégénérer quand même ?',
+    ui.ButtonSet.YES_NO
+  ) === ui.Button.YES;
+}
+
+
+/**
  * Menu : Générer le bail pour le locataire sélectionné.
  */
 function menuGenererBail() {
@@ -1156,6 +1198,7 @@ function menuGenererBail() {
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
+    if (!confirmerRegenerationSignature(ui, tenant, ['BAIL'])) return;
 
     var result = generateLeaseDoc(tenant, config, chambre);
 
@@ -1271,6 +1314,7 @@ function menuGenererEDL() {
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
+    if (!confirmerRegenerationSignature(ui, tenant, ['EDL'])) return;
 
     var result = generateEDL(tenant, config);
 
@@ -1706,6 +1750,7 @@ function menuGenererBailEtEDL() {
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
+    if (!confirmerRegenerationSignature(ui, tenant, ['BAIL', 'EDL'])) return;
 
     // 1) Génération du bail
     var bailResult = generateLeaseDoc(tenant, config, chambre);

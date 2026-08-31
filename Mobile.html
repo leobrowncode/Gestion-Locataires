@@ -165,6 +165,81 @@
     .badge.ok { background: #dcfce7; color: #166534; }
     .badge.no { background: #f3f4f6; color: #9ca3af; }
     .hint { margin: 0 0 12px; font-size: 0.82rem; color: #6b7280; }
+    /* Récapitulatif de signature (avant confirmation) */
+    .recap {
+      background: #f8fafc;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      margin: 14px 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .recap.blocked { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+    .recap.warn-box { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+    /* Une ligne d'état par document signable (bail, EDL entrée, EDL sortie) */
+    .sig-doc {
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 11px 13px;
+      margin: 10px 0;
+      background: #fff;
+    }
+    .sig-doc-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .sig-doc-nom { font-size: 0.9rem; font-weight: 600; color: #111827; }
+    .sig-pill {
+      flex: none;
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 3px 9px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .sig-pill.ok { background: #dcfce7; color: #166534; }
+    .sig-pill.no { background: #f3f4f6; color: #6b7280; }
+    .sig-pill.warn-b { background: #fef3c7; color: #92400e; }
+    .sig-pill.ko { background: #fee2e2; color: #991b1b; }
+    .sig-doc-info { margin-top: 6px; font-size: 0.78rem; color: #6b7280; }
+    .sig-doc-err { margin-top: 6px; font-size: 0.78rem; color: #b91c1c; }
+    .sig-doc-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .sig-doc-actions button, .sig-doc-actions .btn-link { margin: 0; }
+    .btn-link {
+      display: block;
+      flex: 1;
+      text-align: center;
+      text-decoration: none;
+      padding: 13px 12px;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      background: #047857;
+      color: #fff;
+    }
+    .recap b { color: inherit; }
+    .checkline {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 0.85rem;
+      color: #374151;
+      margin: 12px 0 4px;
+    }
+    .checkline input { width: auto; margin: 0; }
+    .checkline label {
+      margin: 0;
+      font-size: 0.85rem;
+      text-transform: none;
+      letter-spacing: 0;
+      color: #374151;
+      font-weight: 500;
+    }
     .divider {
       border: none;
       border-top: 1px solid #e5e7eb;
@@ -195,6 +270,7 @@
     #status.visible { transform: translateY(0); }
     #status.ok { background: #047857; }
     #status.err { background: #b91c1c; }
+    #status.warn { background: #b45309; }
     #status .close {
       float: right;
       background: rgba(255,255,255,0.25);
@@ -331,6 +407,47 @@
     </div>
   </div>
 
+  <!-- 4. Signature électronique (Documenso) — dossier du locataire -->
+  <div class="card">
+    <div class="section-title">Signature électronique</div>
+    <p class="hint">
+      Le <strong>bailleur signe d'abord</strong>, le locataire ensuite.
+      Bail + état des lieux d'entrée partent dans <strong>une seule enveloppe</strong>.
+    </p>
+    <p class="hint" id="sig-meta" style="color:#1a73e8;font-weight:600;">Chargement…</p>
+
+    <label for="sig-tenant">Locataire</label>
+    <select id="sig-tenant" onchange="sigChangerLocataire()"><option>Chargement…</option></select>
+    <div class="badges" id="badges-signature" style="margin:12px 0 4px;"></div>
+
+    <!-- Une ligne d'état par document : bail, EDL entrée, EDL sortie -->
+    <div id="sig-etat"><p class="hint">Sélectionnez un locataire.</p></div>
+
+    <hr class="divider">
+
+    <p class="sub-title">Bail + état des lieux d'entrée</p>
+    <p class="hint">
+      Une seule campagne pour les deux documents. « Bail + état des lieux » désigne toujours
+      l'état des lieux d'<strong>entrée</strong> : le bail ne part jamais avec celui de sortie.
+    </p>
+    <button class="accent" onclick="sigPreparer('BAIL_ET_EDL_ENTREE')">✍️ Envoyer bail + EDL d'entrée</button>
+
+    <div class="checkline">
+      <input type="checkbox" id="sig-dryrun" onchange="sigReset()">
+      <label for="sig-dryrun">Mode test (DRY_RUN) — génère les PDF, n'envoie rien</label>
+    </div>
+
+    <div id="sig-recap"></div>
+    <button class="warn" id="sig-confirm" disabled onclick="sigConfirmer()">✍️ Confirmer l'envoi</button>
+
+    <hr class="divider">
+    <button class="secondary" onclick="sigActualiser()">🔄 Actualiser les statuts</button>
+    <p class="hint" style="margin:12px 0 0;">
+      Le suivi tourne aussi tout seul chaque heure (déclencheur <code>triggerSuiviSignatures</code>) :
+      dès que les deux signatures sont posées, les PDF signés sont archivés dans Drive.
+    </p>
+  </div>
+
   <div class="loader-overlay" id="loader"></div>
   <div id="status"><span class="close" onclick="hideStatus()">✕</span><span id="status-text"></span></div>
 
@@ -340,6 +457,15 @@
     // Mois visé par la quittance 1 clic — calculé par le SERVEUR
     // (getMoisQuittanceCible) : mois suivant à partir du 25, mois en cours avant.
     var MOIS_CIBLE = null;
+    // Signature : métadonnées serveur + récapitulatif validé.
+    // SIG_PRET n'est renseigné qu'après un « Vérifier et récapituler » sans
+    // blocage — l'envoi est refusé tant qu'il est nul (garde-fou côté client,
+    // doublé par preflightSignature côté serveur).
+    var SIG_META = null;
+    var SIG_PRET = null;
+    // État des trois documents (bail, EDL entrée, EDL sortie) du locataire
+    // sélectionné, tel que renvoyé par webGetSignatureEtat.
+    var SIG_ETAT = null;
 
     // MOIS_FR est en minuscules côté serveur ("juillet 2026") — on capitalise
     // pour l'affichage uniquement, jamais pour une comparaison.
@@ -373,18 +499,21 @@
     function getOnboardTenant() {
       return tenantByRow(parseInt(document.getElementById('tenant-onboard').value, 10));
     }
+    function getSignatureTenant() {
+      return tenantByRow(parseInt(document.getElementById('sig-tenant').value, 10));
+    }
 
     function showStatus(text, kind) {
       var el = document.getElementById('status');
       document.getElementById('status-text').textContent = text;
-      el.classList.remove('ok', 'err');
+      el.classList.remove('ok', 'err', 'warn');
       if (kind) el.classList.add(kind);
       el.classList.add('visible');
     }
     function showLoading(label) {
       var el = document.getElementById('status');
       document.getElementById('status-text').innerHTML = '<span class="spinner"></span>' + label;
-      el.classList.remove('ok', 'err');
+      el.classList.remove('ok', 'err', 'warn');
       el.classList.add('visible');
     }
     function hideStatus() { document.getElementById('status').classList.remove('visible'); }
@@ -394,8 +523,11 @@
       document.getElementById('loader').classList.toggle('visible', loading);
     }
 
-    // run(fn, getArgs, label) — exécute une action serveur puis rafraîchit l'état.
-    function run(fn, getArgs, label) {
+    // run(fn, getArgs, label, getArgsConfirme)
+    // Exécute une action serveur puis rafraîchit l'état. Si le serveur répond
+    // { ok:false, confirmationRequise:true }, l'action est rejouée avec les
+    // arguments de confirmation — seulement si l'utilisateur accepte.
+    function run(fn, getArgs, label, getArgsConfirme) {
       var args;
       try { args = getArgs(); } catch (e) { showStatus('⚠️ ' + e.message, 'err'); return; }
       showLoading(label);
@@ -403,7 +535,16 @@
       google.script.run
         .withSuccessHandler(function(res) {
           setLoading(false);
-          showStatus(res.message, 'ok');
+          if (res && res.ok === false && res.confirmationRequise) {
+            showStatus(res.message, 'warn');
+            if (getArgsConfirme && confirm(res.message + '\n\nContinuer quand même ?')) {
+              run(fn, getArgsConfirme, label);
+              return;
+            }
+            loadTenants();
+            return;
+          }
+          showStatus(res.message, res && res.ok === false ? 'err' : 'ok');
           loadTenants();   // rafraîchit badges + état quittances après action
         })
         .withFailureHandler(function(err) {
@@ -419,23 +560,39 @@
     }
 
     // --- Génération documents avec garde anti-régénération (sélecteur onboarding) ---
+    // Régénérer recopie le modèle : le PDF *et* le Google Doc de travail sont
+    // remplacés. Le serveur ajoute une seconde confirmation si ce document est
+    // rattaché à une signature électronique.
     function genBail() {
       var tn = getOnboardTenant();
       if (!tn) { showStatus('⚠️ Sélectionnez un locataire.', 'err'); return; }
-      if (tn.bail && !confirm('Bail déjà généré pour ' + tn.nom + '.\nRégénérer et écraser le PDF existant ?')) return;
-      run('webGenererBail', function(){ return [tn.row, tn.bail]; }, 'Génération du bail…');
+      if (tn.bail && !confirm('Bail déjà généré pour ' + tn.nom + '.\n\n' +
+          'Régénérer écrase le PDF ET le Google Doc de travail : les modifications ' +
+          'faites à la main dans le document seront perdues.\n\nContinuer ?')) return;
+      run('webGenererBail',
+          function(){ return [tn.row, tn.bail, false]; },
+          'Génération du bail…',
+          function(){ return [tn.row, tn.bail, true]; });
     }
     function genEdl() {
       var tn = getOnboardTenant();
       if (!tn) { showStatus('⚠️ Sélectionnez un locataire.', 'err'); return; }
-      if (tn.edl && !confirm('EDL déjà généré pour ' + tn.nom + '.\nRégénérer et écraser le PDF existant ?')) return;
-      run('webGenererEDL', function(){ return [tn.row, tn.edl]; }, 'Génération de l\'EDL…');
+      if (tn.edl && !confirm('EDL déjà généré pour ' + tn.nom + '.\n\n' +
+          'Régénérer écrase le PDF ET le Google Doc de travail : les constats et ' +
+          'relevés saisis à la main (entrée comme sortie) seront perdus.\n\nContinuer ?')) return;
+      run('webGenererEDL',
+          function(){ return [tn.row, tn.edl, false]; },
+          'Génération de l\'EDL…',
+          function(){ return [tn.row, tn.edl, true]; });
     }
     // Bail + EDL : génère seulement le manquant (force=false), conserve l'existant.
     function genBailEdl() {
       var tn = getOnboardTenant();
       if (!tn) { showStatus('⚠️ Sélectionnez un locataire.', 'err'); return; }
-      run('webGenererBailEtEDL', function(){ return [tn.row, false]; }, 'Génération bail + EDL…');
+      run('webGenererBailEtEDL',
+          function(){ return [tn.row, false, false]; },
+          'Génération bail + EDL…',
+          function(){ return [tn.row, false, true]; });
     }
 
     // Quittance d'un mois choisi (rattrapage) → PDF + brouillon Gmail
@@ -492,6 +649,334 @@
         badge(!!tn.email, 'Email');
     }
 
+    // --- Signature électronique ------------------------------------------
+
+    function updateSignatureBadges() {
+      var box = document.getElementById('badges-signature');
+      var tn = getSignatureTenant();
+      if (!tn) { box.innerHTML = ''; return; }
+      box.innerHTML =
+        badge(tn.bail, 'Bail généré') +
+        badge(tn.edl, 'EDL généré') +
+        badge(!!tn.email, 'Email');
+    }
+
+    // Toute modification du contexte invalide le récapitulatif : on n'envoie
+    // jamais une campagne qui n'a pas été vérifiée telle quelle.
+    function sigReset() {
+      SIG_PRET = null;
+      var box = document.getElementById('sig-recap');
+      box.innerHTML = '';
+      box.className = '';
+      syncSignatureUI();
+    }
+
+    function sigChangerLocataire() {
+      sigReset();
+      updateSignatureBadges();
+      loadSignatureEtat();
+    }
+
+    // setLoading(false) réactive TOUS les boutons : on réapplique l'état réel
+    // du bouton de confirmation après chaque action.
+    function syncSignatureUI() {
+      var btn = document.getElementById('sig-confirm');
+      if (!btn) return;
+      var pret = !!SIG_PRET;
+      btn.disabled = !pret;
+      btn.className = pret && SIG_PRET.dryRun ? 'secondary' : 'warn';
+      btn.textContent = !pret ? '✍️ Confirmer l\'envoi'
+                       : SIG_PRET.dryRun ? '🧪 Lancer le test (aucun envoi)'
+                       : '✍️ Confirmer l\'envoi — ' + SIG_PRET.recap.campagneLibelle;
+    }
+
+    // --- Les trois lignes d'état : bail, EDL entrée, EDL sortie ------------
+
+    var SIG_CLASSES = {
+      NON_ENVOYE: 'no', DRAFT: 'no', PREPARING: 'no',
+      AWAITING_BAILLEUR: 'warn-b', AWAITING_LOCATAIRE: 'warn-b',
+      COMPLETED: 'ok', REJECTED: 'ko', CANCELLED: 'no', ERROR: 'ko'
+    };
+
+    function loadSignatureEtat() {
+      var tn = getSignatureTenant();
+      var box = document.getElementById('sig-etat');
+      if (!tn) { box.innerHTML = '<p class="hint">Sélectionnez un locataire.</p>'; return; }
+      box.innerHTML = '<p class="hint">Chargement de l\'état…</p>';
+
+      google.script.run
+        .withSuccessHandler(function(etat) { SIG_ETAT = etat; renderSignatureEtat(); })
+        .withFailureHandler(function(err) {
+          box.innerHTML = '<p class="hint" style="color:#b91c1c;">❌ ' +
+            (err && err.message ? err.message : err) + '</p>';
+        })
+        .webGetSignatureEtat(tn.row);
+    }
+
+    function renderSignatureEtat() {
+      var box = document.getElementById('sig-etat');
+      if (!SIG_ETAT || !SIG_ETAT.length) { box.innerHTML = ''; return; }
+
+      box.innerHTML = SIG_ETAT.map(function(d, i) {
+        var cls = SIG_CLASSES[d.statut] || 'no';
+        var lignes = [];
+        lignes.push('<div class="sig-doc">');
+        lignes.push('  <div class="sig-doc-head">' +
+                    '<span class="sig-doc-nom">' + escapeHtml(d.libelle) + '</span>' +
+                    '<span class="sig-pill ' + cls + '">' + escapeHtml(d.statutLibelle) + '</span>' +
+                    '</div>');
+
+        var details = [];
+        if (d.bailleurSignedAt) details.push('Bailleur signé le ' + escapeHtml(d.bailleurSignedAt));
+        if (d.locataireSignedAt) details.push('Locataire signé le ' + escapeHtml(d.locataireSignedAt));
+        if (d.envelopeId) details.push('Enveloppe ' + escapeHtml(d.envelopeId));
+        if (details.length) lignes.push('  <div class="sig-doc-info">' + details.join(' · ') + '</div>');
+        if (d.erreur) {
+          lignes.push('  <div class="sig-doc-err">' + escapeHtml(d.erreur.split('\n')[0]) + '</div>');
+        }
+
+        // Le bouton principal s'adapte à l'état du dossier.
+        lignes.push('  <div class="sig-doc-actions">');
+        if (d.actionPrincipale.cle === 'SIGNER') {
+          lignes.push('    <button class="accent" onclick="sigSignerMaintenant(' + i + ')">🖊️ Signer maintenant</button>');
+        } else if (d.actionPrincipale.cle === 'TELECHARGER') {
+          lignes.push(d.fichierSigneUrl
+            ? '    <a class="btn-link" href="' + escapeHtml(d.fichierSigneUrl) + '" target="_blank" rel="noopener">📥 Télécharger le document signé</a>'
+            : '    <button class="secondary" onclick="sigActualiser()">🔄 Actualiser</button>');
+        } else if (d.actionPrincipale.cle === 'ACTUALISER') {
+          lignes.push('    <button class="secondary" onclick="sigActualiser()">🔄 ' +
+                      escapeHtml(d.actionPrincipale.libelle) + '</button>');
+        } else if (d.actionPrincipale.cle === 'REPRENDRE') {
+          lignes.push('    <button class="secondary" onclick="sigActualiser()">🔄 Reprendre la campagne</button>');
+        } else {
+          lignes.push('    <button class="accent" onclick="sigPreparer(\'' + d.campaignType + '\')">✍️ Envoyer en signature</button>');
+        }
+        if (d.actions.indexOf('ANNULER') !== -1 && d.signatureRequestId) {
+          lignes.push('    <button class="secondary" onclick="sigAnnuler(' + i + ')">🚫 Annuler</button>');
+        }
+        lignes.push('  </div>');
+        lignes.push('</div>');
+        return lignes.join('\n');
+      }).join('\n');
+    }
+
+    function escapeHtml(s) {
+      return String(s === null || s === undefined ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // --- Récapitulatif avant envoi ----------------------------------------
+
+    function sigRecapHtml(recap, avertissements) {
+      var l = [];
+      l.push('<b>Logement</b> : ' + escapeHtml(recap.logement));
+      l.push('<b>Locataire</b> : ' + escapeHtml(recap.locataire) + ' — ' + escapeHtml(recap.locataireEmail));
+      l.push('<b>Bailleur</b> : ' + escapeHtml(recap.bailleur) + ' — ' + escapeHtml(recap.bailleurEmail));
+      l.push('<b>Documents</b> : ' + recap.documents.map(escapeHtml).join(' + ') +
+             (recap.enveloppeUnique ? ' — une seule enveloppe Documenso' : ''));
+      l.push('<b>État des lieux</b> : ' + escapeHtml(recap.etatDesLieuxType));
+      l.push('<b>Ordre de signature</b> : ' + escapeHtml(recap.ordre));
+      l.push('<b>Emplacement Drive</b> : ' + escapeHtml(recap.emplacementDrive));
+      l.push('<b>Demande existante</b> : ' + (recap.demandeExistante
+        ? escapeHtml(recap.demandeExistante.signatureRequestId) + ' (' +
+          escapeHtml(recap.demandeExistante.statut) + ')'
+        : 'aucune'));
+      if (avertissements && avertissements.length) {
+        l.push('⚠️ ' + avertissements.map(escapeHtml).join('\n⚠️ '));
+      }
+      if (recap.dryRun) l.push('🧪 <b>MODE TEST</b> — les PDF seront générés, rien ne sera envoyé.');
+      return l.join('\n');
+    }
+
+    function sigPreparer(campaignType) {
+      var tn = getSignatureTenant();
+      if (!tn) { showStatus('⚠️ Sélectionnez un locataire.', 'err'); return; }
+      var dryRun = document.getElementById('sig-dryrun').checked;
+
+      SIG_PRET = null;
+      syncSignatureUI();
+      showLoading('Vérification du dossier…');
+      setLoading(true);
+
+      google.script.run
+        .withSuccessHandler(function(res) {
+          setLoading(false);
+          hideStatus();
+          var box = document.getElementById('sig-recap');
+          if (!res.ok) {
+            box.className = 'recap blocked';
+            box.innerHTML = '<b>Envoi bloqué :</b>\n   • ' + res.blocages.map(escapeHtml).join('\n   • ');
+            SIG_PRET = null;
+          } else {
+            box.className = res.avertissements.length ? 'recap warn-box' : 'recap';
+            box.innerHTML = sigRecapHtml(res.recap, res.avertissements);
+            SIG_PRET = { row: tn.row, campaignType: campaignType, dryRun: dryRun, recap: res.recap };
+          }
+          syncSignatureUI();
+          box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        })
+        .withFailureHandler(function(err) {
+          setLoading(false);
+          showStatus('❌ ' + (err && err.message ? err.message : err), 'err');
+          SIG_PRET = null;
+          syncSignatureUI();
+        })
+        .webPreparerSignature(tn.row, campaignType);
+    }
+
+    function sigConfirmer() {
+      if (!SIG_PRET) {
+        showStatus('⚠️ Lancez d\'abord « Envoyer en signature » pour obtenir le récapitulatif.', 'err');
+        return;
+      }
+      var p = SIG_PRET;
+      var question = p.dryRun
+        ? 'Lancer le test pour ' + p.recap.locataire + ' ?\n\nAucune enveloppe ne sera créée.'
+        : 'Envoyer en signature — ' + p.recap.campagneLibelle + '\npour ' + p.recap.locataire + ' ?\n\n'
+          + 'Le bailleur (' + p.recap.bailleurEmail + ') signe en premier,\n'
+          + 'puis le locataire (' + p.recap.locataireEmail + ').\n'
+          + '⚠️ Envoi immédiat.';
+      if (!confirm(question)) return;
+
+      sigEnvoyer(p, false);
+    }
+
+    // `confirmerReprise` n'est vrai que si l'utilisateur a explicitement validé
+    // la relance d'une campagne précédemment refusée ou annulée.
+    function sigEnvoyer(p, confirmerReprise) {
+      showLoading(p.dryRun ? 'Simulation en cours…' : 'Envoi à Documenso…');
+      setLoading(true);
+
+      google.script.run
+        .withSuccessHandler(function(res) {
+          setLoading(false);
+          if (res.confirmationRequise) {
+            hideStatus();
+            if (confirm(res.message + '\n\nCréer malgré tout une nouvelle campagne ?')) {
+              sigEnvoyer(p, true);
+            } else {
+              syncSignatureUI();
+            }
+            return;
+          }
+          showStatus((res.reprise ? 'ℹ️ ' : '✅ ') + res.message,
+                     res.reprise ? 'warn' : 'ok');
+          SIG_PRET = null;
+          var box = document.getElementById('sig-recap');
+          box.innerHTML = '';
+          box.className = '';
+          syncSignatureUI();
+          loadSignatureEtat();
+          if (res.bailleurSigningUrl && !res.dryRun) {
+            if (confirm('Campagne envoyée.\n\nOuvrir maintenant la page de signature du bailleur ?')) {
+              window.open(res.bailleurSigningUrl, '_blank');
+            }
+          }
+        })
+        .withFailureHandler(function(err) {
+          setLoading(false);
+          showStatus('❌ ' + (err && err.message ? err.message : err), 'err');
+          SIG_PRET = null;
+          syncSignatureUI();
+          loadSignatureEtat();
+        })
+        .webEnvoyerSignature(p.row, p.campaignType, p.dryRun, confirmerReprise === true);
+    }
+
+    // --- Signer maintenant / actualiser / annuler -------------------------
+
+    // On ne signe JAMAIS à la place du bailleur : on ouvre sa page Documenso.
+    function sigSignerMaintenant(index) {
+      var d = SIG_ETAT[index];
+      if (!d || !d.signatureRequestId) return;
+
+      if (d.bailleurSigningUrl) { window.open(d.bailleurSigningUrl, '_blank'); return; }
+
+      showLoading('Récupération du lien de signature…');
+      setLoading(true);
+      google.script.run
+        .withSuccessHandler(function(res) {
+          setLoading(false);
+          hideStatus();
+          if (res.ok && res.url) window.open(res.url, '_blank');
+          else showStatus('⚠️ ' + res.message, 'err');
+        })
+        .withFailureHandler(function(err) {
+          setLoading(false);
+          showStatus('❌ ' + (err && err.message ? err.message : err), 'err');
+        })
+        .webGetSigningUrlBailleur(d.signatureRequestId);
+    }
+
+    function sigActualiser() {
+      var tn = getSignatureTenant();
+      showLoading('Interrogation de Documenso…');
+      setLoading(true);
+      google.script.run
+        .withSuccessHandler(function(res) {
+          setLoading(false);
+          showStatus(res.message, 'ok');
+          if (res.etat) { SIG_ETAT = res.etat; renderSignatureEtat(); }
+          else loadSignatureEtat();
+          syncSignatureUI();
+        })
+        .withFailureHandler(function(err) {
+          setLoading(false);
+          showStatus('❌ ' + (err && err.message ? err.message : err), 'err');
+          syncSignatureUI();
+        })
+        .webActualiserStatutsSignature(tn ? tn.row : null);
+    }
+
+    function sigAnnuler(index) {
+      var d = SIG_ETAT[index];
+      if (!d || !d.signatureRequestId) return;
+      if (!confirm('Annuler la campagne « ' + d.libelle + ' » ?\n\n' +
+                   (d.envelopeId ? 'Enveloppe ' + d.envelopeId + ' — ' : '') +
+                   'les signataires ne pourront plus signer.')) return;
+
+      showLoading('Annulation…');
+      setLoading(true);
+      google.script.run
+        .withSuccessHandler(function(res) {
+          setLoading(false);
+          showStatus(res.message, 'ok');
+          loadSignatureEtat();
+          syncSignatureUI();
+        })
+        .withFailureHandler(function(err) {
+          setLoading(false);
+          showStatus('❌ ' + (err && err.message ? err.message : err), 'err');
+          syncSignatureUI();
+        })
+        .webAnnulerSignature(d.signatureRequestId, 'Annulation depuis la web app');
+    }
+
+    function loadSignatureMeta(done) {
+      google.script.run
+        .withSuccessHandler(function(meta) {
+          SIG_META = meta;
+          var el = document.getElementById('sig-meta');
+          var bits = [];
+          bits.push(meta.tokenConfigure ? 'Token Documenso configuré.'
+                                        : '⚠️ DOCUMENSO_API_TOKEN absent — seul le mode test fonctionne.');
+          if (!meta.triggerInstalle) {
+            bits.push('⚠️ Suivi horaire non installé (exécuter installerTriggerSignatures).');
+          }
+          if (meta.dryRunGlobal) bits.push('🧪 DRY_RUN forcé au niveau du script.');
+          el.textContent = bits.join(' ');
+          el.style.color = (meta.tokenConfigure && meta.triggerInstalle) ? '#1a73e8' : '#b45309';
+          if (done) done();
+        })
+        .withFailureHandler(function(err) {
+          document.getElementById('sig-meta').textContent =
+            '❌ ' + (err && err.message ? err.message : err);
+          if (done) done();
+        })
+        .webGetSignatureMeta();
+    }
+
     function fillMois() {
       var sel = document.getElementById('mois');
       for (var i = 0; i < 12; i++) {
@@ -508,7 +993,9 @@
       // Recharge aussi le meta : si la bascule du 25 est franchie pendant que
       // l'app reste ouverte, le mois cible doit suivre.
       loadMeta(function() {
-        loadTenants(function(){ btn.classList.remove('spinning'); });
+        loadSignatureMeta(function() {
+          loadTenants(function(){ btn.classList.remove('spinning'); });
+        });
       });
     }
 
@@ -532,8 +1019,10 @@
     function loadTenants(done) {
       var sel = document.getElementById('q-tenant');
       var selOnb = document.getElementById('tenant-onboard');
+      var selSig = document.getElementById('sig-tenant');
       var prevRow = sel.value;                 // préserver les sélections au rechargement
       var prevRowOnb = selOnb.value;
+      var prevRowSig = selSig.value;
       google.script.run
         .withSuccessHandler(function(list) {
           // Trier : actifs en premier, puis par chambre
@@ -549,10 +1038,19 @@
                      'Aucun colocataire actif');
           // Sélecteur onboarding : tout le monde (futurs locataires non encore cochés inclus)
           fillSelect(selOnb, TENANTS, prevRowOnb, 'Aucun locataire');
+          // Sélecteur signature : tout le monde également (le bail se signe
+          // avant que la case « Actif » ne soit cochée)
+          fillSelect(selSig, TENANTS, prevRowSig, 'Aucun locataire');
 
           renderActifs();
           updateBadges();
           updateOnboardBadges();
+          updateSignatureBadges();
+          // Le locataire ciblé a pu changer → le récapitulatif validé n'est
+          // plus garanti pertinent.
+          if (SIG_PRET && String(SIG_PRET.row) !== String(selSig.value)) SIG_PRET = null;
+          syncSignatureUI();
+          loadSignatureEtat();
           if (done) done();
         })
         .withFailureHandler(function(err) {
@@ -629,7 +1127,9 @@
     fillMois();
     // Meta d'abord : le libellé du mois cible vient du serveur, les boutons
     // 1 clic sont rendus ensuite avec le bon mois.
-    loadMeta(function() { loadTenants(); });
+    loadMeta(function() {
+      loadSignatureMeta(function() { loadTenants(); });
+    });
   </script>
 </body>
 </html>

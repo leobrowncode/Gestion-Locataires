@@ -19,6 +19,8 @@ préavis, archivage — plus un module de comptabilité des charges.
 |---|---|
 | `Code.gs` | Module principal : menu, bail, état des lieux, quittances, attestation d'assurance, emails, suivi des loyers, archivage Drive |
 | `Code_Compta.gs` | Comptabilité : saisie des charges, import CSV bancaire, import d'un tableau d'amortissement, bilan |
+| `Documenso.gs` | Client de l'API Documenso V2 (signature électronique) — couche HTTP dédiée |
+| `Signature.gs` | Signature électronique : campagnes bail / EDL entrée / EDL sortie, marqueurs, suivi, archivage des documents signés |
 | `WebApp.gs` | Back-end de la web app mobile (point d'entrée `doGet`, wrappers `web*`) |
 | `Mobile.html` | Interface mobile installable sur l'écran d'accueil (PWA) |
 | `Compta_Form.html` | Dialogue « Ajouter une charge » |
@@ -34,10 +36,11 @@ préavis, archivage — plus un module de comptabilité des charges.
 | `Config` | Paires clé/valeur : identité du bailleur, adresse du bien, IDs des templates et dossiers Drive |
 | `Templates` | Emails (objet + corps HTML) avec placeholders `{{Variable}}` |
 | `Suivi Loyers` | Loyers encaissés, un mois par ligne, une colonne par chambre — alimenté à chaque quittance |
+| `SignatureRequests` | Campagnes de signature : type, statut, identifiants Documenso, empreintes des PDF, fichiers signés |
 | `Comptabilité` | Charges : date, catégorie, description, montant, chambre, justificatif |
 | `Bilan Charges` | Synthèse recalculée à la demande : total annuel par catégorie + tableau mois × catégorie |
 
-Les trois derniers onglets sont créés automatiquement à la première utilisation.
+Les quatre derniers onglets sont créés automatiquement à la première utilisation.
 
 ## Installation
 
@@ -56,12 +59,26 @@ Les trois derniers onglets sont créés automatiquement à la première utilisat
    que soi-même, accès « Moi uniquement ». Ouvrir l'URL sur mobile et l'ajouter à l'écran d'accueil.
 7. **Archivage automatique** (optionnel) — exécuter une fois `installerTriggerArchivage` pour
    déplacer chaque mois les dossiers des locataires partis vers `LOCATAIRES/OLD`.
+8. **Signature électronique** (optionnel) — token Documenso dans les propriétés de script,
+   marqueurs internes (`[[SIGNATURE_BAILLEUR_BAIL]]`, `[[DATE_LOCATAIRE_SORTIE]]`…) à ajouter dans
+   les cellules de signature des modèles de bail et d'EDL, puis exécuter une fois
+   `installerTriggerSignatures`. Procédure détaillée : [`docs/documenso.md`](docs/documenso.md).
 
 ## Workflows
 
 **Nouveau locataire** — demander les pièces justificatives ▸ générer bail + état des lieux ▸ envoyer
-le dossier de location (bail, EDL et documents communs en pièces jointes) ▸ envoyer l'attestation
-d'assurance. Tous les emails à fort enjeu partent en **brouillon Gmail**, jamais en envoi direct.
+le dossier de location (bail, EDL et documents communs en pièces jointes) ▸ **envoyer en signature
+électronique** ▸ envoyer l'attestation d'assurance. Tous les emails à fort enjeu partent en
+**brouillon Gmail**, jamais en envoi direct.
+
+**Signature électronique** — quatre campagnes : bail, état des lieux d'**entrée**, état des lieux de
+**sortie**, ou bail + EDL d'entrée dans **une seule enveloppe Documenso**. Le **bailleur signe
+d'abord**, le locataire ensuite ; un bouton « Signer maintenant » ouvre la page de signature du
+bailleur (le système ne signe jamais à sa place). Récapitulatif complet puis confirmation explicite ;
+un mode test génère les PDF sans rien envoyer. L'état des lieux garde **un seul Google Doc de
+travail** pour l'entrée et la sortie — le PDF d'entrée signé n'est jamais écrasé, celui de sortie est
+un nouveau fichier. Le suivi tourne chaque heure : dès qu'une enveloppe est signée, les PDF signés,
+le certificat et la piste d'audit sont archivés dans le dossier Drive du locataire.
 
 **Chaque mois** — à réception du virement, un bouton par colocataire dans la web app génère la
 quittance, l'enregistre dans `Suivi Loyers` et l'envoie. Le premier loyer (entrée en cours de mois)
@@ -77,3 +94,18 @@ restitution du dépôt) ▸ envoyer l'EDL de sortie au format Word ▸ générer
   logique métier, helpers, pièges connus.
 - [`docs/configuration-sheet.md`](docs/configuration-sheet.md) — configuration du Sheet : formule du
   dernier loyer, clés `Config`, corps HTML des templates d'emails, workflow de fin de location.
+- [`docs/documenso.md`](docs/documenso.md) — signature électronique : compte et token Documenso,
+  migration des modèles Google Docs, convention `r1`/`r2`, mode test, envoi, suivi, annulation,
+  archivage, quota du plan gratuit.
+
+## Tests
+
+Aucune dépendance : les tests chargent les vrais fichiers `.gs` dans un contexte `vm` avec des
+stubs Apps Script en mémoire. L'API Documenso est mockée — **aucun test ne peut déclencher une
+vraie demande de signature**.
+
+```bash
+npm test      # contrôle de syntaxe + tests unitaires
+npm run lint  # syntaxe .gs et JS des .html, recherche de secrets versionnés
+npm run check # les deux
+```
