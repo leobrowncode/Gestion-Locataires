@@ -135,7 +135,26 @@ Garanties, vérifiées par les tests :
 - aucun placeholder Documenso n'est jamais écrit dans le Doc de travail ;
 - les deux campagnes ont leurs propres statuts, enveloppes et fichiers.
 
-### 3.3 Copies techniques
+### 3.3 Régénérer un document déjà en signature
+
+Régénérer le bail ou l'EDL depuis le menu ou la web app **recopie le modèle** : le Google Doc de
+travail est remplacé et son identifiant réécrit sur la ligne du locataire. Tout ce qui a été saisi
+à la main disparaît — pour l'EDL, les constats et relevés d'entrée dont la campagne de sortie a
+besoin — et le document ne correspond plus à celui parti en signature.
+
+`signatureBlocageRegeneration(tenant, 'BAIL'|'EDL')` interpose donc une confirmation dès qu'une
+campagne **signée** (`COMPLETED`) ou **en cours** porte sur ce document :
+
+| Contexte | Comportement |
+|---|---|
+| Menu du Sheet | `ui.alert` YES/NO supplémentaire listant les campagnes concernées |
+| Web app | `webGenererBail` / `webGenererEDL` / `webGenererBailEtEDL` renvoient `{ ok: false, confirmationRequise: true, message }` tant que leur 3e argument `confirmerSignature` vaut `false` ; l'action est rejouée avec `true` si l'utilisateur accepte |
+| « Bail + EDL » | Contrôle limité aux pièces réellement régénérées (sans `force`, celles déjà présentes sont conservées, donc rien n'est menacé) |
+
+Une campagne `CANCELLED` ou `REJECTED` ne bloque rien. Sans campagne — et même sans onglet
+`SignatureRequests` — le comportement d'origine est strictement inchangé.
+
+### 3.4 Copies techniques
 
 Elles sont créées dans `LOCATAIRES/<Locataire>/Signature/_Technique/`, mises à la corbeille après un
 export PDF réussi, et **conservées en cas d'échec** — leur identifiant figure dans le message
@@ -325,9 +344,9 @@ Une ligne par campagne. Créé automatiquement à la première demande.
 
 | Colonne | Contenu |
 |---|---|
-| `signatureRequestId` | Identifiant interne, ex. `SR-BAIL-L2-dupont-marie-20260831-1` |
+| `signatureRequestId` | Identifiant interne, ex. `SR-BAIL-dupont-marie-ch2-20260831-1` |
 | `externalId` | Identifiant déterministe transmis à Documenso (cf. §6) |
-| `dossierId` / `tenantRow` / `locationId` | Rattachement au dossier, à la ligne et au logement |
+| `dossierId` / `tenantRow` / `locationId` | Rattachement au dossier, à la ligne et au logement (cf. §10.1) |
 | `campaignType` | `BAIL` / `EDL_ENTREE` / `EDL_SORTIE` / `BAIL_ET_EDL_ENTREE` |
 | `etatDesLieuxType` | `ENTREE`, `SORTIE`, ou vide |
 | `sourceDocumentIds` / `sourceRevisionIds` | Google Docs de travail copiés, et leur date de dernière modification |
@@ -342,6 +361,31 @@ Une ligne par campagne. Créé automatiquement à la première demande.
 | `auditMetadataFileId` | Certificat de signature / journal d'audit |
 | `lastErrorCode` / `lastErrorMessage` | Dernier échec — sans jamais de secret |
 | `createdAt` / `updatedAt` | Horodatages de la ligne |
+
+---
+
+### 10.1 Le rattachement ne passe pas par le numéro de ligne
+
+Une campagne vit plusieurs jours ; entre-temps l'onglet `Locataires` peut être trié, complété d'une
+ligne ou allégé d'une autre. Un rattachement par index de ligne se serait alors décalé : au mieux la
+fiche du locataire aurait réaffiché « non envoyé » et laissé créer un doublon, au pire un PDF signé
+aurait été archivé dans le dossier Drive d'un autre locataire.
+
+- `dossierId` vaut la colonne facultative **`dossierId`** de la ligne si elle est renseignée — gelée
+  au premier envoi, donc insensible à une correction de nom ou à un changement de chambre — sinon
+  `<slug du nom>-ch<chambre>`.
+- Les comparaisons passent toutes par `signatureMemeDossier`, qui neutralise l'ancien préfixe
+  `L<ligne>-` et le suffixe de chambre : **les campagnes déjà ouvertes restent rattachées**, aucune
+  reprise manuelle n'est nécessaire.
+- `tenantRow` reste écrit, mais n'est qu'un raccourci : il n'est retenu que si la ligne porte
+  toujours le même dossier ; sinon l'onglet est balayé pour retrouver le bon locataire.
+
+Ajouter la colonne `dossierId` à l'onglet `Locataires` est **facultatif** et recommandé : sans elle,
+renommer un locataire ou changer sa chambre pendant une campagne détacherait celle-ci.
+
+Limite assumée : deux locataires **homonymes exacts** partageraient la même clé. Le cas échéant,
+distinguer leurs dossiers dans la colonne `dossierId` (`dupont-marie-1`, `dupont-marie-2`) — seul le
+suffixe `-ch<n>` est neutralisé à la comparaison.
 
 ---
 

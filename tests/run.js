@@ -1574,6 +1574,221 @@ test('non-régression : les marqueurs internes ne sont pas des variables {{...}}
 });
 
 // ---------------------------------------------------------------------------
+// K. RATTACHEMENT AU DOSSIER — insensible au décalage des lignes
+// ---------------------------------------------------------------------------
+
+/** Nom du dossier Drive contenant un fichier du Drive simulé. */
+function dossierDuFichier(env, nomFichier) {
+  const fichier = [...env.drive.fichiers.values()]
+    .filter((f) => !f.trashed && f.name === nomFichier)[0];
+  if (!fichier) throw new Error('Fichier introuvable dans le Drive simulé : ' + nomFichier);
+  let dossier = env.drive.dossiers.get(fichier.parent);
+  // Les pièces signées vivent dans <Locataire>/Signature/ : on remonte d'un cran.
+  if (dossier && dossier.name === 'Signature') dossier = env.drive.dossiers.get(dossier.parent);
+  return dossier ? dossier.name : '';
+}
+
+/** Environnement à deux locataires, DUPONT en ligne 2. */
+function envDeuxLocataires() {
+  return harness.creerEnvironnement({
+    locataires: [
+      locataireBase(),
+      Object.assign(locataireBase(), {
+        Locataire_Nom: 'BERNARD Paul',
+        EMAIL: 'paul.bernard@example.com',
+        Chambre: 3,
+        ID_DOC_BAIL: '',
+        ID_DOC_EDL: ''
+      })
+    ]
+  });
+}
+
+/** Insère une ligne en tête de l'onglet Locataires : tout descend d'un cran. */
+function insererLocataireEnTete(env, nom) {
+  const sheet = env.onglets.get('Locataires');
+  const ligne = harness.EN_TETES_LOCATAIRES.map((h) => {
+    if (h === 'Locataire_Nom') return nom;
+    if (h === 'Chambre') return 1;
+    if (h === 'Actif') return true;
+    return '';
+  });
+  sheet.valeurs.splice(1, 0, ligne);
+}
+
+test('dossier : l\'identifiant ne dépend pas du numéro de ligne', () => {
+  const env = envDeuxLocataires();
+  const avant = env.ctx.signatureDossierId(env.ctx.getTenantByRow(2));
+
+  insererLocataireEnTete(env, 'NOUVEAU Locataire');
+  const apres = env.ctx.signatureDossierId(env.ctx.getTenantByRow(3));
+
+  assertEgal(apres, avant, 'le même locataire garde le même dossier après décalage');
+  assertAbsent(avant, 'L2-', 'le numéro de ligne n\'entre plus dans l\'identifiant');
+  assert(env.ctx.signatureDossierId(env.ctx.getTenantByRow(4)) !== avant,
+         'deux locataires distincts ont deux dossiers distincts');
+});
+
+test('dossier : une ligne insérée ne détache pas la campagne de son locataire', () => {
+  const env = envDeuxLocataires();
+  env.urlFetch.setRouteur(routeur({ get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL') }) }) }));
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+
+  insererLocataireEnTete(env, 'NOUVEAU Locataire');
+
+  const etatDupont = env.ctx.etatSignatureLocataire(3);
+  assertEgal(etatDupont[0].statut, 'AWAITING_BAILLEUR', 'la campagne suit son locataire ligne 3');
+
+  // Et le nouvel arrivant, désormais en ligne 2, n'hérite de rien.
+  const etatNouveau = env.ctx.etatSignatureLocataire(2);
+  assertEgal(etatNouveau[0].statut, 'NON_ENVOYE', 'le locataire arrivé en ligne 2 n\'hérite pas de la campagne');
+});
+
+test('dossier : un PDF signé est archivé chez SON locataire après décalage des lignes', () => {
+  const env = envDeuxLocataires();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  // Un nouveau locataire est saisi pendant que la signature circule.
+  insererLocataireEnTete(env, 'NOUVEAU Locataire');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  const signe = fichiersDrive(env).filter((n) => /_Bail_.*_SIGNE\.pdf$/.test(n))[0];
+  assert(signe, 'le bail signé est archivé');
+  assertContient(signe, 'DUPONT', 'le fichier signé porte le nom de SON locataire');
+  assertEgal(dossierDuFichier(env, signe), 'DUPONT Marie',
+             'le document signé est rangé chez DUPONT, pas chez le locataire arrivé sur sa ligne');
+});
+
+test('dossier : les campagnes au format L<ligne>- restent rattachées', () => {
+  // Compatibilité : les campagnes créées avant cette correction portent un
+  // dossierId préfixé du numéro de ligne.
+  const env = harness.creerEnvironnement();
+  const tenant = env.ctx.getTenantByRow(2);
+  assert(env.ctx.signatureMemeDossier('L2-dupont-marie', env.ctx.signatureDossierId(tenant)),
+         'ancien et nouveau format désignent le même dossier');
+  assert(!env.ctx.signatureMemeDossier('L2-bernard-paul', env.ctx.signatureDossierId(tenant)),
+         'deux noms différents ne sont pas confondus');
+  assert(!env.ctx.signatureMemeDossier('', env.ctx.signatureDossierId(tenant)),
+         'un dossier vide ne correspond à personne');
+});
+
+test('dossier : l\'identifiant est gelé sur la ligne quand la colonne existe', () => {
+  const env = harness.creerEnvironnement({
+    enTetes: harness.EN_TETES_LOCATAIRES.concat(['dossierId'])
+  });
+  env.urlFetch.setRouteur(routeur({ get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL') }) }) }));
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+
+  const fige = String(env.ctx.getTenantByRow(2).dossierId);
+  assert(fige.indexOf('dupont-marie') !== -1, 'le dossier est écrit sur la ligne du locataire');
+
+  // Nom corrigé après coup : le dossier gelé maintient le rattachement.
+  const sheet = env.onglets.get('Locataires');
+  sheet.valeurs[1][harness.EN_TETES_LOCATAIRES.indexOf('Locataire_Nom')] = 'DUPOND Marie';
+  assertEgal(env.ctx.etatSignatureLocataire(2)[0].statut, 'AWAITING_BAILLEUR',
+             'la campagne survit à une correction de nom');
+});
+
+// ---------------------------------------------------------------------------
+// L. RÉGÉNÉRATION D'UN DOCUMENT RATTACHÉ À UNE SIGNATURE
+// ---------------------------------------------------------------------------
+
+/** Envoie une campagne puis renvoie l'environnement. */
+function envAvecCampagne(campaignType, statutFinal) {
+  const env = harness.creerEnvironnement({ locataires: [locataireSortie()] });
+  const items = itemsPour(env, campaignType);
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe(statutFinal, { items, signes: ['SIGNED', 'SIGNED'] }) })
+  }));
+  env.ctx.envoyerDemandeSignature(2, campaignType);
+  if (statutFinal) {
+    phase = 'final';
+    env.ctx.actualiserStatutsSignature();
+  }
+  return env;
+}
+
+test('régénération : refusée tant qu\'une campagne est en cours', () => {
+  const env = envAvecCampagne('EDL_ENTREE');
+  const res = env.ctx.webGenererEDL(2, true);
+
+  assertEgal(res.ok, false, 'la génération ne part pas');
+  assertEgal(res.confirmationRequise, true, 'une confirmation explicite est demandée');
+  assertContient(res.message, 'Google Doc de travail', 'le message dit ce qui serait écrasé');
+  assertContient(res.message, 'relevés d\'entrée', 'le message nomme les données perdues');
+  assertEgal(String(env.ctx.getTenantByRow(2).ID_DOC_EDL), 'doc-4',
+             'le Doc de travail est intact');
+});
+
+test('régénération : refusée après signature, le Doc signé n\'est pas remplacé', () => {
+  const env = envAvecCampagne('BAIL', 'COMPLETED');
+  const docAvant = String(env.ctx.getTenantByRow(2).ID_DOC_BAIL);
+
+  const res = env.ctx.webGenererBail(2, true);
+  assertEgal(res.ok, false, 'la génération ne part pas');
+  assertContient(res.message, 'Signé', 'le statut signé est rappelé');
+  assertEgal(String(env.ctx.getTenantByRow(2).ID_DOC_BAIL), docAvant, 'le Doc de travail est intact');
+});
+
+test('régénération : confirmée explicitement, elle s\'exécute', () => {
+  const env = envAvecCampagne('EDL_ENTREE');
+  const docAvant = String(env.ctx.getTenantByRow(2).ID_DOC_EDL);
+
+  const res = env.ctx.webGenererEDL(2, true, true);
+  assertEgal(res.ok, true, 'la génération aboutit après confirmation');
+  assert(String(env.ctx.getTenantByRow(2).ID_DOC_EDL) !== docAvant, 'un nouveau Doc de travail est créé');
+});
+
+test('régénération : une campagne annulée ne bloque plus', () => {
+  const env = envAvecCampagne('EDL_ENTREE');
+  const demande = lignesSuivi(env)[0];
+  env.ctx.annulerDemandeSignature(demande.signatureRequestId, 'erreur de destinataire');
+
+  assertEgal(env.ctx.signatureBlocageRegeneration(env.ctx.getTenantByRow(2), 'EDL'), '',
+             'plus rien à protéger une fois la campagne annulée');
+  assertEgal(env.ctx.webGenererEDL(2, true).ok, true, 'la régénération repasse');
+});
+
+test('régénération : sans campagne, le comportement est inchangé', () => {
+  const env = harness.creerEnvironnement();
+  assertEgal(env.ctx.signatureBlocageRegeneration(env.ctx.getTenantByRow(2), 'BAIL'), '',
+             'aucun blocage sans campagne');
+  assert(!env.onglets.get('SignatureRequests'),
+         'le contrôle ne crée pas l\'onglet de suivi au passage');
+  assertEgal(env.ctx.webGenererBail(2, true).ok, true, 'le bail se régénère');
+  assertEgal(env.ctx.webGenererEDL(2, true).ok, true, 'l\'EDL se régénère');
+
+  // Le garde-fou historique sur le PDF existant reste en place.
+  assertLeve(() => env.ctx.webGenererBail(2, false), 'déjà généré',
+             'sans force, la régénération reste refusée');
+});
+
+test('régénération : bail + EDL ne bloque que sur ce qu\'il régénère vraiment', () => {
+  const env = envAvecCampagne('BAIL', 'COMPLETED');
+
+  // Sans force, les deux pièces existent déjà : rien n'est régénéré, donc rien
+  // n'est menacé.
+  const sansForce = env.ctx.webGenererBailEtEDL(2, false);
+  assertEgal(sansForce.ok, true, 'aucun blocage quand aucune pièce n\'est régénérée');
+  assertContient(sansForce.message, 'conservé', 'les pièces existantes sont conservées');
+
+  // Avec force, le bail signé est en jeu.
+  const avecForce = env.ctx.webGenererBailEtEDL(2, true);
+  assertEgal(avecForce.confirmationRequise, true, 'le bail signé déclenche la confirmation');
+});
+
+// ---------------------------------------------------------------------------
 // Jeux de données partagés
 // ---------------------------------------------------------------------------
 

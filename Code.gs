@@ -1155,6 +1155,33 @@ function createDossierLocationDraft(tenant, config, chambre) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Confirmation supplémentaire quand régénérer écraserait le Google Doc de
+ * travail rattaché à une signature électronique.
+ *
+ * @param {Object} ui — SpreadsheetApp.getUi().
+ * @param {Object} tenant
+ * @param {Array<string>} typesDoc — `'BAIL'` et/ou `'EDL'`.
+ * @return {boolean} true si la génération peut se poursuivre.
+ */
+function confirmerRegenerationSignature(ui, tenant, typesDoc) {
+  if (typeof signatureBlocageRegeneration !== 'function') return true;
+
+  var messages = [];
+  for (var i = 0; i < typesDoc.length; i++) {
+    var message = signatureBlocageRegeneration(tenant, typesDoc[i]);
+    if (message) messages.push(message);
+  }
+  if (!messages.length) return true;
+
+  return ui.alert(
+    'Signature électronique en jeu',
+    messages.join('\n\n') + '\n\nRégénérer quand même ?',
+    ui.ButtonSet.YES_NO
+  ) === ui.Button.YES;
+}
+
+
+/**
  * Menu : Générer le bail pour le locataire sélectionné.
  */
 function menuGenererBail() {
@@ -1171,6 +1198,7 @@ function menuGenererBail() {
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
+    if (!confirmerRegenerationSignature(ui, tenant, ['BAIL'])) return;
 
     var result = generateLeaseDoc(tenant, config, chambre);
 
@@ -1286,6 +1314,7 @@ function menuGenererEDL() {
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
+    if (!confirmerRegenerationSignature(ui, tenant, ['EDL'])) return;
 
     var result = generateEDL(tenant, config);
 
@@ -1721,6 +1750,7 @@ function menuGenererBailEtEDL() {
       ui.ButtonSet.YES_NO
     );
     if (confirm !== ui.Button.YES) return;
+    if (!confirmerRegenerationSignature(ui, tenant, ['BAIL', 'EDL'])) return;
 
     // 1) Génération du bail
     var bailResult = generateLeaseDoc(tenant, config, chambre);

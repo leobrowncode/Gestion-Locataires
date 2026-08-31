@@ -523,8 +523,11 @@
       document.getElementById('loader').classList.toggle('visible', loading);
     }
 
-    // run(fn, getArgs, label) — exécute une action serveur puis rafraîchit l'état.
-    function run(fn, getArgs, label) {
+    // run(fn, getArgs, label, getArgsConfirme)
+    // Exécute une action serveur puis rafraîchit l'état. Si le serveur répond
+    // { ok:false, confirmationRequise:true }, l'action est rejouée avec les
+    // arguments de confirmation — seulement si l'utilisateur accepte.
+    function run(fn, getArgs, label, getArgsConfirme) {
       var args;
       try { args = getArgs(); } catch (e) { showStatus('⚠️ ' + e.message, 'err'); return; }
       showLoading(label);
@@ -532,7 +535,16 @@
       google.script.run
         .withSuccessHandler(function(res) {
           setLoading(false);
-          showStatus(res.message, 'ok');
+          if (res && res.ok === false && res.confirmationRequise) {
+            showStatus(res.message, 'warn');
+            if (getArgsConfirme && confirm(res.message + '\n\nContinuer quand même ?')) {
+              run(fn, getArgsConfirme, label);
+              return;
+            }
+            loadTenants();
+            return;
+          }
+          showStatus(res.message, res && res.ok === false ? 'err' : 'ok');
           loadTenants();   // rafraîchit badges + état quittances après action
         })
         .withFailureHandler(function(err) {
@@ -548,23 +560,39 @@
     }
 
     // --- Génération documents avec garde anti-régénération (sélecteur onboarding) ---
+    // Régénérer recopie le modèle : le PDF *et* le Google Doc de travail sont
+    // remplacés. Le serveur ajoute une seconde confirmation si ce document est
+    // rattaché à une signature électronique.
     function genBail() {
       var tn = getOnboardTenant();
       if (!tn) { showStatus('⚠️ Sélectionnez un locataire.', 'err'); return; }
-      if (tn.bail && !confirm('Bail déjà généré pour ' + tn.nom + '.\nRégénérer et écraser le PDF existant ?')) return;
-      run('webGenererBail', function(){ return [tn.row, tn.bail]; }, 'Génération du bail…');
+      if (tn.bail && !confirm('Bail déjà généré pour ' + tn.nom + '.\n\n' +
+          'Régénérer écrase le PDF ET le Google Doc de travail : les modifications ' +
+          'faites à la main dans le document seront perdues.\n\nContinuer ?')) return;
+      run('webGenererBail',
+          function(){ return [tn.row, tn.bail, false]; },
+          'Génération du bail…',
+          function(){ return [tn.row, tn.bail, true]; });
     }
     function genEdl() {
       var tn = getOnboardTenant();
       if (!tn) { showStatus('⚠️ Sélectionnez un locataire.', 'err'); return; }
-      if (tn.edl && !confirm('EDL déjà généré pour ' + tn.nom + '.\nRégénérer et écraser le PDF existant ?')) return;
-      run('webGenererEDL', function(){ return [tn.row, tn.edl]; }, 'Génération de l\'EDL…');
+      if (tn.edl && !confirm('EDL déjà généré pour ' + tn.nom + '.\n\n' +
+          'Régénérer écrase le PDF ET le Google Doc de travail : les constats et ' +
+          'relevés saisis à la main (entrée comme sortie) seront perdus.\n\nContinuer ?')) return;
+      run('webGenererEDL',
+          function(){ return [tn.row, tn.edl, false]; },
+          'Génération de l\'EDL…',
+          function(){ return [tn.row, tn.edl, true]; });
     }
     // Bail + EDL : génère seulement le manquant (force=false), conserve l'existant.
     function genBailEdl() {
       var tn = getOnboardTenant();
       if (!tn) { showStatus('⚠️ Sélectionnez un locataire.', 'err'); return; }
-      run('webGenererBailEtEDL', function(){ return [tn.row, false]; }, 'Génération bail + EDL…');
+      run('webGenererBailEtEDL',
+          function(){ return [tn.row, false, false]; },
+          'Génération bail + EDL…',
+          function(){ return [tn.row, false, true]; });
     }
 
     // Quittance d'un mois choisi (rattrapage) → PDF + brouillon Gmail

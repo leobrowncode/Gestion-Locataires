@@ -156,6 +156,7 @@ const DOC_EDL_TRAVAIL_SORTIE = DOC_EDL_TRAVAIL.map((p) => p
  *   config            — surcharges de l'onglet Config.
  *   proprietes        — propriétés de script.
  *   templateBail/Edl  — paragraphes des modèles Google Docs.
+ *   enTetes           — en-têtes de l'onglet Locataires (défaut : EN_TETES_LOCATAIRES).
  * @return {Object} { ctx, drive, urlFetch, props, onglets, ids }
  */
 function creerEnvironnement(opts) {
@@ -211,13 +212,16 @@ function creerEnvironnement(opts) {
     ID_DOC_EDL: docEdlTravail.id
   }];
 
+  // `enTetes` permet d'ajouter une colonne facultative (ex : dossierId) sans
+  // toucher au jeu de données par défaut.
+  const enTetes = opts.enTetes || EN_TETES_LOCATAIRES;
   const lignes = (opts.locataires || locatairesParDefaut).map((loc) =>
-    EN_TETES_LOCATAIRES.map((h) => (loc[h] === undefined ? '' : loc[h])));
+    enTetes.map((h) => (loc[h] === undefined ? '' : loc[h])));
 
   // --- Onglets -----------------------------------------------------------
   const onglets = new Map();
   onglets.set('Config', new stubs.FakeSheet('Config', lignesConfig));
-  onglets.set('Locataires', new stubs.FakeSheet('Locataires', [EN_TETES_LOCATAIRES].concat(lignes)));
+  onglets.set('Locataires', new stubs.FakeSheet('Locataires', [enTetes].concat(lignes)));
   onglets.set('Chambres', new stubs.FakeSheet('Chambres', [
     EN_TETES_CHAMBRES,
     [1, '13 m²', 480, 100, 580, 480, 'Lit, bureau, armoire'],

@@ -107,6 +107,7 @@ Une ligne par locataire. Colonnes :
 | `bailSignatureRequestId` | *(facultative, lecture seule)* Campagne de signature du bail. Écrite via `updateTenantCellIfExists` → silencieuse si la colonne n'existe pas. |
 | `entrySignatureRequestId` | *(facultative, lecture seule)* Campagne de signature de l'EDL d'entrée. |
 | `exitSignatureRequestId` | *(facultative, lecture seule)* Campagne de signature de l'EDL de sortie. |
+| `dossierId` | *(facultative)* Identifiant de dossier **gelé au premier envoi en signature** (`updateTenantCellIfExists`, silencieux si la colonne n'existe pas). Rend le rattachement des campagnes insensible à une correction de nom ou à un changement de chambre. Sans cette colonne, l'identifiant est dérivé du nom et de la chambre — jamais du numéro de ligne. |
 
 **Sélection** : les fonctions du menu opèrent sur la **ligne active** de l'onglet `Locataires`.
 
@@ -324,9 +325,9 @@ Une ligne par **campagne** de signature. Colonnes (`SIGNATURE_HEADERS`) :
 
 | Colonne | Contenu |
 |---|---|
-| `signatureRequestId` | Identifiant interne lisible, ex. `SR-BAIL-L2-dupont-marie-20260831-1` |
+| `signatureRequestId` | Identifiant interne lisible, ex. `SR-BAIL-dupont-marie-ch2-20260831-1` |
 | `externalId` | Identifiant déterministe transmis à Documenso (cf. §5.9) |
-| `dossierId` / `tenantRow` / `locationId` | Rattachement au dossier, à la ligne du Sheet et au logement |
+| `dossierId` / `tenantRow` / `locationId` | Rattachement au dossier, à la ligne du Sheet et au logement. `dossierId` est **indépendant du numéro de ligne** (cf. §5.11) ; `tenantRow` n'est qu'un raccourci, revalidé avant usage |
 | `campaignType` | `BAIL` / `EDL_ENTREE` / `EDL_SORTIE` / `BAIL_ET_EDL_ENTREE` |
 | `etatDesLieuxType` | `ENTREE`, `SORTIE`, ou vide |
 | `sourceDocumentIds` / `sourceRevisionIds` | Google Docs de travail copiés + date de dernière modification |
@@ -586,6 +587,41 @@ effort ». Un archivage incomplet laisse la campagne en `ERROR` / `ARCHIVAGE_PAR
 `COMPLETED` qu'une fois tous les fichiers en place. Les copies techniques vivent dans
 `Signature/_Technique/`.
 
+### 5.11 Rattachement d'une campagne à son locataire
+
+Une campagne survit des jours à sa création : entre-temps, l'onglet `Locataires` peut être trié, ou
+une ligne insérée / supprimée. Le rattachement ne repose donc **jamais** sur le numéro de ligne.
+
+- **`signatureDossierId(tenant)`** = la colonne facultative `dossierId` si elle est renseignée
+  (gelée au premier envoi), sinon `<slug du nom>-ch<chambre>`.
+- **`signatureDossierCle`** neutralise, pour la comparaison, l'ancien préfixe `L<ligne>-` et le
+  suffixe de chambre : les campagnes créées avant cette règle, ou avant un changement de chambre,
+  restent rattachées. Toutes les recherches passent par **`signatureMemeDossier`**.
+- **`tenantRow`** reste écrit dans le suivi, mais n'est qu'un raccourci :
+  `signatureNomLocataireDeDemande` ne l'accepte que si la ligne porte toujours le même dossier,
+  sinon elle balaie l'onglet pour retrouver le bon locataire. C'est ce nom qui désigne le dossier
+  Drive d'archivage — s'y tromper rangerait un document signé chez quelqu'un d'autre.
+
+### 5.12 Régénérer un document rattaché à une signature
+
+Régénérer le bail ou l'EDL recopie le **modèle** : le Google Doc de travail est remplacé et son
+identifiant réécrit sur la ligne. Les saisies manuelles disparaissent — pour l'EDL, les constats et
+relevés d'entrée dont la campagne de sortie a besoin — et le document cesse d'être celui qui est
+parti en signature.
+
+`signatureBlocageRegeneration(tenant, 'BAIL'|'EDL')` renvoie le message d'alerte quand une campagne
+signée (`COMPLETED`) ou encore en cours porte sur ce document, `''` sinon (y compris sans onglet de
+suivi : le comportement historique est intact). Il est consulté :
+
+- par les menus (`confirmerRegenerationSignature` → `ui.alert` YES/NO supplémentaire) ;
+- par la web app : `webGenererBail` / `webGenererEDL` / `webGenererBailEtEDL` acceptent un
+  3e argument `confirmerSignature` et renvoient `{ ok: false, confirmationRequise: true, message }`
+  tant qu'il vaut `false`. `run()` (Mobile.html) affiche le message en ambre et rejoue l'action avec
+  la confirmation si l'utilisateur accepte. Pour « bail + EDL », le contrôle ne porte que sur les
+  pièces réellement régénérées.
+
+Une campagne `CANCELLED` ou `REJECTED` ne protège rien : elle ne bloque pas la régénération.
+
 ---
 
 ## 6. Helpers / fonctions utilitaires
@@ -659,6 +695,10 @@ effort ». Un archivage incomplet laisse la campagne en `ERROR` / `ARCHIVAGE_PAR
 | `archiverDocumentsSignes(...)` | Écriture Drive de **tous** les PDF signés + certificat + journal |
 | `signatureTypeDocumentPourElement(...)` | Appariement `envelopeItem` ↔ document, par titre puis par ordre |
 | `annulerDemandeSignature(signatureRequestId, motif)` | `POST /envelope/cancel` + mise à jour du suivi |
+| `signatureDossierId(tenant)` / `signatureDossierCle(id)` / `signatureMemeDossier(a, b)` | Rattachement d'une campagne à son locataire, sans jamais passer par le numéro de ligne |
+| `signatureNomLocataireDeDemande(demande)` / `signatureChercherLocataireParDossier(cle)` | Locataire d'une campagne — `tenantRow` revalidé, sinon recherche par dossier |
+| `signatureCampagnesLiees(tenant, typeDoc)` / `signatureBlocageRegeneration(tenant, typeDoc)` | Campagnes qu'une régénération détruirait, et le message d'alerte correspondant |
+| `confirmerRegenerationSignature(ui, tenant, typesDoc)` (Code.gs) / `webBlocageSignature(...)` (WebApp.gs) | Confirmation supplémentaire avant de régénérer, côté menu et côté web app |
 | `etatSignatureLocataire(row)` | Trois lignes d'état (bail, EDL entrée, EDL sortie) + action principale |
 | `triggerSuiviSignatures()` / `installerTriggerSignatures()` / `signatureTriggerInstalle()` | Déclencheur horaire de suivi |
 | `webGetSignatureMeta()` / `webGetSignatureEtat(row)` / `webPreparerSignature(row, campaignType)` / `webEnvoyerSignature(...)` / `webActualiserStatutsSignature(row)` / `webGetSigningUrlBailleur(id)` / `webAnnulerSignature(...)` | Wrappers web app |
@@ -695,6 +735,14 @@ effort ». Un archivage incomplet laisse la campagne en `ERROR` / `ARCHIVAGE_PAR
 13. **Déclencheur de suivi** : `installerTriggerSignatures()` est à exécuter **une fois** depuis
     l'éditeur Apps Script. Sans lui, les statuts ne se mettent à jour que sur clic manuel
     (« 🔄 Actualiser les statuts ») — la web app le signale dans l'en-tête de la section signature.
+14. **Régénérer n'est jamais anodin** : bail comme EDL repartent du **modèle**, donc le Google Doc
+    de travail est remplacé et tout ce qui y a été saisi à la main est perdu. Une confirmation
+    supplémentaire apparaît si le document est rattaché à une signature (cf. §5.12) ; hors
+    signature, la confirmation habituelle dit désormais explicitement que le Doc de travail est
+    écrasé, pas seulement le PDF.
+15. **Ne jamais rattacher une donnée durable au numéro de ligne** : l'onglet `Locataires` se trie et
+    se complète. Les campagnes de signature se rattachent au dossier (§5.11) ; toute nouvelle
+    fonctionnalité qui mémorise un locataire doit faire de même.
 
 ---
 

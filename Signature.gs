@@ -383,7 +383,7 @@ function trouverDemandesParExternalId(externalId) {
  */
 function trouverCampagnePourDossier(dossierId, campaignType) {
   var candidates = lireDemandesSignature().filter(function(d) {
-    return d['dossierId'].toString() === dossierId &&
+    return signatureMemeDossier(d['dossierId'], dossierId) &&
            d['campaignType'].toString() === campaignType &&
            ['REJECTED', 'CANCELLED'].indexOf(d['status'].toString().toUpperCase()) === -1;
   });
@@ -885,9 +885,63 @@ function preparerPdfNonSigne(typeDoc, edlType, tenant, config, dossier, dossierT
 // 7. IDENTIFIANTS ET IDEMPOTENCE
 // ---------------------------------------------------------------------------
 
-/** Identifiant stable du dossier locataire. */
+/**
+ * Identifiant stable du dossier locataire.
+ *
+ * Volontairement INDÉPENDANT du numéro de ligne. Une insertion, une suppression
+ * ou un tri de l'onglet « Locataires » décale les lignes : une campagne
+ * rattachée à un index de ligne se retrouverait orpheline — au mieux la fiche
+ * réafficherait « non envoyé » et laisserait recréer un doublon, au pire un PDF
+ * signé serait archivé dans le dossier Drive d'un autre locataire.
+ *
+ * Deux sources, dans l'ordre :
+ *   1. la colonne facultative `dossierId` de la ligne si elle est renseignée —
+ *      identifiant gelé au premier envoi, donc insensible à une correction de
+ *      nom ou à un changement de chambre ultérieurs ;
+ *   2. à défaut, un identifiant dérivé du nom et de la chambre.
+ *
+ * @param {Object} tenant
+ * @return {string}
+ */
 function signatureDossierId(tenant) {
-  return 'L' + tenant._rowIndex + '-' + signatureSlug(tenant['Locataire_Nom']);
+  var fige = signatureTexte(tenant['dossierId']).trim();
+  if (fige) return fige;
+  var chambre = signatureTexte(tenant['Chambre']).trim();
+  return signatureSlug(tenant['Locataire_Nom']) + '-ch' + (chambre || '0');
+}
+
+/**
+ * Clé de comparaison de deux identifiants de dossier.
+ *
+ * Neutralise le préfixe `L<ligne>-` des campagnes créées par les versions
+ * antérieures ainsi que le suffixe de chambre : une campagne ouverte avant
+ * cette correction, ou avant un changement de chambre, reste rattachée à son
+ * locataire.
+ *
+ * Limite assumée : deux locataires **homonymes exacts** partageraient la même
+ * clé. Le cas échéant, distinguer les dossiers dans la colonne `dossierId`
+ * (`dupont-marie-1`, `dupont-marie-2`) — seul le suffixe `-ch<n>` est neutralisé.
+ *
+ * @param {*} dossierId
+ * @return {string}
+ */
+function signatureDossierCle(dossierId) {
+  return signatureTexte(dossierId)
+    .toLowerCase()
+    .trim()
+    .replace(/^l\d+-/, '')
+    .replace(/-ch\d*$/, '');
+}
+
+/** true si deux identifiants de dossier désignent le même locataire. */
+function signatureMemeDossier(a, b) {
+  var cle = signatureDossierCle(a);
+  return cle !== '' && cle === signatureDossierCle(b);
+}
+
+/** Chaîne sûre à partir d'une valeur de cellule (`''` si vide). */
+function signatureTexte(valeur) {
+  return (valeur === null || valeur === undefined) ? '' : valeur.toString();
 }
 
 /** Identifiant du logement (adresse + chambre). */
@@ -937,7 +991,7 @@ function construireExternalId(elements) {
  */
 function construireSignatureRequestId(campaignType, dossierId) {
   var deja = lireDemandesSignature().filter(function(d) {
-    return d['dossierId'].toString() === dossierId &&
+    return signatureMemeDossier(d['dossierId'], dossierId) &&
            d['campaignType'].toString() === campaignType;
   }).length;
 
@@ -1088,7 +1142,7 @@ function preflightSignature(ctx, options) {
   var refusee = null;
   if (!existante) {
     var refusees = lireDemandesSignature().filter(function(d) {
-      return d['dossierId'].toString() === ctx.dossierId &&
+      return signatureMemeDossier(d['dossierId'], ctx.dossierId) &&
              d['campaignType'].toString() === ctx.campaignType;
     });
     refusee = refusees.length ? refusees[refusees.length - 1] : null;
@@ -1230,7 +1284,7 @@ function envoyerDemandeSignature(row, campaignType, options) {
   // silence : l'utilisateur doit confirmer qu'il veut vraiment recommencer.
   if (!dryRun) {
     var precedentes = lireDemandesSignature().filter(function(d) {
-      return d['dossierId'].toString() === ctx.dossierId &&
+      return signatureMemeDossier(d['dossierId'], ctx.dossierId) &&
              d['campaignType'].toString() === ctx.campaignType &&
              ['REJECTED', 'CANCELLED'].indexOf((d['status'] || '').toString().toUpperCase()) !== -1;
     });
@@ -1370,6 +1424,11 @@ function envoyerDemandeSignatureVerrouillee(ctx, pre, dryRun, options) {
   }
 
   // --- 4. Trace AVANT tout appel réseau ------------------------------------
+  // Le dossier est gelé sur la ligne du locataire dès le premier envoi (si la
+  // colonne existe) : une correction de nom ou un changement de chambre
+  // ultérieurs ne détachent plus la campagne de son locataire.
+  updateTenantCellIfExists(ctx.tenant._sheet, ctx.tenant._rowIndex, 'dossierId', ctx.dossierId);
+
   var signatureRequestId = construireSignatureRequestId(ctx.campaignType, ctx.dossierId);
   var pdfIds = {};
   var pdfHashes = {};
@@ -1680,7 +1739,7 @@ function actualiserStatutsSignature(deps) {
   var demandes = lireDemandesSignature().filter(function(d) {
     var st = (d['status'] || '').toString().toUpperCase();
     if (SIGNATURE_STATUTS_FINAUX.indexOf(st) !== -1) return false;
-    if (deps.filtreDossierId && d['dossierId'].toString() !== deps.filtreDossierId) return false;
+    if (deps.filtreDossierId && !signatureMemeDossier(d['dossierId'], deps.filtreDossierId)) return false;
     return true;
   });
 
@@ -1991,14 +2050,78 @@ function signatureTypeDocumentPourElement(element, documents, edlType, nomLocata
   return documents[index] || null;
 }
 
-/** Nom du locataire rattaché à une campagne (via sa ligne, avec repli). */
+/**
+ * Nom du locataire rattaché à une campagne.
+ *
+ * C'est ce nom qui désigne le dossier Drive d'archivage : une erreur ici range
+ * un document signé chez quelqu'un d'autre. `tenantRow` n'est donc qu'un
+ * raccourci — il n'est retenu que si la ligne désigne toujours le même dossier,
+ * ce qui n'est plus vrai dès qu'une ligne a été insérée, supprimée ou triée.
+ *
+ * @param {Object} demande
+ * @return {string}
+ */
 function signatureNomLocataireDeDemande(demande) {
+  var cle = signatureDossierCle(demande['dossierId']);
+
+  // 1. Voie rapide : la ligne mémorisée, si elle porte bien le même dossier.
   var row = parseInt(demande['tenantRow'], 10);
   if (row >= 2) {
-    try { return (getTenantByRow(row)['Locataire_Nom'] || '').toString(); } catch (e) { /* ligne supprimée */ }
+    try {
+      var tenant = getTenantByRow(row);
+      if (!cle || signatureMemeDossier(signatureDossierId(tenant), cle)) {
+        return signatureTexte(tenant['Locataire_Nom']);
+      }
+    } catch (e) { /* ligne supprimée ou hors plage */ }
   }
-  // Repli : le dossierId encode le nom sous forme de slug.
-  return (demande['dossierId'] || '').toString().replace(/^L\d+-/, '').replace(/-/g, ' ').toUpperCase();
+
+  // 2. La ligne a bougé : on retrouve le locataire par son dossier.
+  if (cle) {
+    var nom = signatureChercherLocataireParDossier(cle);
+    if (nom) return nom;
+  }
+
+  // 3. Dernier repli : le dossierId encode le nom sous forme de slug. Le
+  //    dossier Drive sera peut-être créé sous une casse différente, mais aucun
+  //    document ne part chez un autre locataire.
+  return signatureTexte(demande['dossierId'])
+    .replace(/^L\d+-/i, '')
+    .replace(/-ch\d*$/i, '')
+    .replace(/-/g, ' ')
+    .toUpperCase();
+}
+
+/**
+ * Nom exact du locataire dont le dossier correspond à la clé donnée, `''` si
+ * aucune ligne ne correspond (locataire supprimé de l'onglet).
+ *
+ * @param {string} cle — clé issue de `signatureDossierCle`.
+ * @return {string}
+ */
+function signatureChercherLocataireParDossier(cle) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Locataires');
+  if (!sheet) return '';
+
+  var data = sheet.getDataRange().getValues();
+  if (!data.length) return '';
+  var headers = data[0];
+  var index = {};
+  for (var c = 0; c < headers.length; c++) {
+    index[headers[c].toString().trim()] = c;
+  }
+  if (index['Locataire_Nom'] === undefined) return '';
+
+  for (var r = 1; r < data.length; r++) {
+    var nom = signatureTexte(data[r][index['Locataire_Nom']]).trim();
+    if (!nom) continue;
+    var ligne = {
+      'Locataire_Nom': nom,
+      'Chambre': index['Chambre'] === undefined ? '' : data[r][index['Chambre']],
+      'dossierId': index['dossierId'] === undefined ? '' : data[r][index['dossierId']]
+    };
+    if (signatureMemeDossier(signatureDossierId(ligne), cle)) return nom;
+  }
+  return '';
 }
 
 
@@ -2075,6 +2198,84 @@ var SIGNATURE_STATUT_LIBELLES = {
 };
 
 /**
+ * Campagnes qui rendent la régénération d'un document destructrice.
+ *
+ * Régénérer, c'est recopier le MODÈLE : le Google Doc de travail est remplacé
+ * et son identifiant réécrit dans la ligne du locataire. Tout ce qui a été
+ * saisi à la main y est perdu — pour l'état des lieux, les constats, relevés et
+ * commentaires d'entrée dont la campagne de sortie a besoin — et le document
+ * cesse d'être celui qui a été signé.
+ *
+ * Sont retenues les campagnes signées (`COMPLETED`) et celles encore en cours ;
+ * une campagne annulée ou refusée ne protège rien.
+ *
+ * @param {Object} tenant
+ * @param {string} typeDoc — `'BAIL'` ou `'EDL'`.
+ * @return {Array<Object>} campagnes concernées, de la plus ancienne à la plus récente.
+ */
+function signatureCampagnesLiees(tenant, typeDoc) {
+  var dossierId = signatureDossierId(tenant);
+  return lireDemandesSignature().filter(function(d) {
+    if (!signatureMemeDossier(d['dossierId'], dossierId)) return false;
+    var campagne = SIGNATURE_CAMPAGNES[signatureTexte(d['campaignType'])];
+    if (!campagne || campagne.documents.indexOf(typeDoc) === -1) return false;
+    var statut = signatureTexte(d['status']).toUpperCase();
+    return statut === SIGNATURE_STATUTS.COMPLETED ||
+           SIGNATURE_STATUTS_FINAUX.indexOf(statut) === -1;
+  });
+}
+
+/**
+ * Avertissement à afficher avant de régénérer un document, `''` si la
+ * régénération ne détruit rien.
+ *
+ * Ne lève jamais : sans onglet de suivi ni campagne, la génération doit rester
+ * possible exactement comme avant.
+ *
+ * @param {Object} tenant
+ * @param {string} typeDoc — `'BAIL'` ou `'EDL'`.
+ * @return {string}
+ */
+function signatureBlocageRegeneration(tenant, typeDoc) {
+  // Générer un bail ne doit pas créer l'onglet de suivi au passage : sans
+  // onglet, il n'y a aucune campagne, donc rien à protéger.
+  if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SIGNATURE_SHEET_NAME)) return '';
+
+  var liees;
+  try {
+    liees = signatureCampagnesLiees(tenant, typeDoc);
+  } catch (e) {
+    return '';
+  }
+  if (!liees.length) return '';
+
+  var libelleDoc = typeDoc === 'BAIL' ? 'Le bail' : 'L\'état des lieux';
+  var lignes = liees.map(function(d) {
+    var statut = signatureTexte(d['status']).toUpperCase();
+    return '• ' + signatureTexte(d['signatureRequestId']) + ' — ' +
+           (SIGNATURE_CAMPAGNES[signatureTexte(d['campaignType'])] || { libelle: signatureTexte(d['campaignType']) }).libelle +
+           ' : ' + (SIGNATURE_STATUT_LIBELLES[statut] || statut);
+  });
+
+  var signee = liees.some(function(d) {
+    return signatureTexte(d['status']).toUpperCase() === SIGNATURE_STATUTS.COMPLETED;
+  });
+
+  return libelleDoc + ' est rattaché à une signature électronique :\n' +
+         lignes.join('\n') + '\n\n' +
+         'Régénérer remplace le Google Doc de travail par une copie neuve du modèle : ' +
+         'les saisies manuelles sont perdues' +
+         (typeDoc === 'EDL'
+           ? ' — y compris les constats et relevés d\'entrée dont l\'état des lieux de sortie a besoin'
+           : '') +
+         ', et le document ne correspond plus à celui ' +
+         (signee ? 'qui a été signé.' : 'parti en signature.') + '\n' +
+         (signee
+           ? 'Le PDF signé reste archivé dans Drive, mais le lien avec le document de travail est rompu.'
+           : 'Annulez d\'abord la campagne (🚫 Annuler une demande de signature) si vous voulez repartir de zéro.');
+}
+
+/**
  * Les trois lignes de statut affichées sur la fiche locataire : bail, état des
  * lieux d'entrée, état des lieux de sortie.
  *
@@ -2088,7 +2289,7 @@ function etatSignatureLocataire(row) {
   var tenant = getTenantByRow(row);
   var dossierId = signatureDossierId(tenant);
   var demandes = lireDemandesSignature().filter(function(d) {
-    return d['dossierId'].toString() === dossierId;
+    return signatureMemeDossier(d['dossierId'], dossierId);
   });
 
   var lignes = [

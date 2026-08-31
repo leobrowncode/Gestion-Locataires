@@ -9,12 +9,13 @@ La liste exhaustive des colonnes, clés `Config` et variables de templates est d
 
 ---
 
-## 1. Onglet `Locataires` — 2 colonnes en fin de tableau (après `NOTES`)
+## 1. Onglet `Locataires` — colonnes à ajouter en fin de tableau (après `NOTES`)
 
 | Colonne | Contenu |
 |---|---|
 | `Dernier_Loyer` | Formule (ci-dessous). Montant TTC proratisé du mois de sortie. |
 | `ID_DOC_EDL` | Laisser vide — rempli automatiquement à chaque génération d'EDL (`generateEDL`). |
+| `dossierId` | *(facultative, recommandée)* Laisser vide — écrite au premier envoi en signature. Elle gèle le rattachement des campagnes : sans elle, renommer un locataire ou changer sa chambre pendant une campagne détacherait celle-ci. Ne jamais la modifier à la main. |
 
 ### Formule `Dernier_Loyer` (ligne 2, à recopier vers le bas)
 
