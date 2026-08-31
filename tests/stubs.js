@@ -364,9 +364,14 @@ function construireUtilities() {
     },
     getUuid: () => 'uuid-' + (++uuid).toString().padStart(8, '0'),
     newBlob: (data, contentType, name) => new FakeBlob(data, contentType, name),
-    computeDigest: (algo, texte) => {
+    // computeDigest accepte une chaîne OU un tableau d'octets, comme Apps
+    // Script : l'empreinte d'un PDF est calculée sur Blob.getBytes().
+    computeDigest: (algo, contenu) => {
       const nom = algo === 'MD5' ? 'md5' : 'sha256';
-      const buf = crypto.createHash(nom).update(String(texte), 'utf8').digest();
+      const source = Array.isArray(contenu)
+        ? Buffer.from(contenu.map((b) => (b < 0 ? b + 256 : b)))
+        : Buffer.from(String(contenu), 'utf8');
+      const buf = crypto.createHash(nom).update(source).digest();
       // Apps Script renvoie des octets signés (-128..127)
       return Array.from(buf).map((b) => (b > 127 ? b - 256 : b));
     },
@@ -407,6 +412,24 @@ function construireUrlFetchApp() {
   return app;
 }
 
+/**
+ * Mock de LockService. `etat.occupe = true` simule un envoi déjà en cours —
+ * c'est ainsi qu'est reproduit le double clic sur « Envoyer ».
+ */
+function construireLockService() {
+  const etat = { occupe: false, pris: 0, relaches: 0 };
+  const lock = {
+    tryLock() {
+      if (etat.occupe) return false;
+      etat.occupe = true;
+      etat.pris++;
+      return true;
+    },
+    releaseLock() { etat.occupe = false; etat.relaches++; }
+  };
+  return { _etat: etat, getScriptLock: () => lock };
+}
+
 function construirePropertiesService(initial) {
   const store = new Map(Object.entries(initial || {}));
   const props = {
@@ -428,5 +451,6 @@ module.exports = {
   construireSpreadsheetApp,
   construireUtilities,
   construireUrlFetchApp,
+  construireLockService,
   construirePropertiesService
 };

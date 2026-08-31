@@ -355,6 +355,14 @@ function formatEuro(val) {
 
 /**
  * Duplique le modèle de bail, remplace les variables, enregistre en PDF.
+ *
+ * Le Google Doc de travail est CONSERVÉ (comme celui de l'état des lieux) et
+ * son identifiant écrit dans la colonne ID_DOC_BAIL : c'est lui que la
+ * signature électronique copie pour produire le PDF à signer. Sans lui, il
+ * faudrait régénérer le bail depuis le modèle au moment de la signature, au
+ * risque d'envoyer à la signature un document différent de celui déjà transmis
+ * au locataire.
+ *
  * @param {Object} tenant — Données locataire.
  * @param {Object} config — Données config.
  * @param {Object} chambre — Données chambre.
@@ -377,30 +385,23 @@ function generateLeaseDoc(tenant, config, chambre) {
 
   // Ouvrir et remplacer les variables
   var doc = DocumentApp.openById(docId);
-  applyBailReplacements(doc.getBody(), tenant, config, chambre);
-  doc.saveAndClose();
-
-  // Générer le PDF et supprimer la copie Google Docs
-  var pdfFile = createLeasePdf(docId, docName, folder);
-  DriveApp.getFileById(docId).setTrashed(true);
-
-  return { pdfFile: pdfFile };
-}
-
-/**
- * Applique dans le corps d'un bail toutes les variables {{...}}.
- * Extrait de generateLeaseDoc pour être réutilisé par la copie « prête à
- * signer » de Signature.gs (même contenu, bloc de signature en plus).
- * @param {Body} body — Corps du Google Doc (copie du template de bail).
- * @param {Object} tenant — Données locataire.
- * @param {Object} config — Données config.
- * @param {Object} chambre — Données chambre.
- */
-function applyBailReplacements(body, tenant, config, chambre) {
+  var body = doc.getBody();
   var replacements = buildReplacements(tenant, config, chambre);
+
   for (var placeholder in replacements) {
     body.replaceText(escapeRegex(placeholder), replacements[placeholder]);
   }
+
+  doc.saveAndClose();
+
+  // Générer le PDF. Le Google Doc reste disponible pour la signature
+  // électronique ; son identifiant est mémorisé si la colonne existe.
+  var pdfFile = createLeasePdf(docId, docName, folder);
+  if (tenant._sheet && tenant._rowIndex) {
+    updateTenantCellIfExists(tenant._sheet, tenant._rowIndex, 'ID_DOC_BAIL', docId);
+  }
+
+  return { docId: docId, pdfFile: pdfFile };
 }
 
 /**
@@ -497,25 +498,8 @@ function generateEDL(tenant, config) {
   var docId = copiedFile.getId();
 
   var doc = DocumentApp.openById(docId);
-  applyEdlReplacements(doc.getBody(), tenant, config);
-  doc.saveAndClose();
+  var body = doc.getBody();
 
-  // Générer le PDF
-  var pdfFile = createLeasePdf(docId, docName, folder);
-
-  return { docId: docId, pdfFile: pdfFile };
-}
-
-/**
- * Applique dans le corps d'un EDL la suppression des chambres non concernées
- * puis toutes les variables {{...}} (entrée + sortie).
- * Extrait de generateEDL pour être réutilisé par la copie « prête à signer »
- * de Signature.gs (même contenu, bloc de signature en plus).
- * @param {Body} body — Corps du Google Doc (copie du template d'EDL).
- * @param {Object} tenant — Données locataire.
- * @param {Object} config — Données config.
- */
-function applyEdlReplacements(body, tenant, config) {
   // Supprimer les sections des chambres qui ne correspondent pas au locataire
   var chambreNum = tenant['Chambre'].toString();
   removeOtherRoomSections(body, chambreNum);
@@ -550,6 +534,13 @@ function applyEdlReplacements(body, tenant, config) {
       setTextColor(body, formattedValue, '#000000');
     }
   });
+
+  doc.saveAndClose();
+
+  // Générer le PDF
+  var pdfFile = createLeasePdf(docId, docName, folder);
+
+  return { docId: docId, pdfFile: pdfFile };
 }
 
 /**

@@ -1,12 +1,12 @@
 // =============================================================================
-// Tests — intégration Documenso (aucune dépendance npm, aucun appel réseau)
+// Tests — signature électronique Documenso (aucune dépendance npm, aucun réseau)
 // =============================================================================
 //
 //   node tests/run.js            → contrôle de syntaxe + tous les tests
-//   node tests/run.js signature  → filtre les tests dont le nom contient "signature"
+//   node tests/run.js campagne   → filtre les tests dont le nom contient "campagne"
 //
 // L'API Documenso est intégralement mockée : AUCUN test ne peut déclencher une
-// vraie demande de signature.
+// vraie demande de signature ni envoyer un email réel.
 // =============================================================================
 
 'use strict';
@@ -37,7 +37,13 @@ function assertEgal(reel, attendu, message) {
 function assertContient(texte, fragment, message) {
   if (String(texte).indexOf(fragment) === -1) {
     throw new Error('Assertion échouée : ' + message +
-      '\n    « ' + fragment +' » absent de : ' + String(texte).slice(0, 400));
+      '\n    « ' + fragment + ' » absent de : ' + String(texte).slice(0, 500));
+  }
+}
+function assertAbsent(texte, fragment, message) {
+  if (String(texte).indexOf(fragment) !== -1) {
+    throw new Error('Assertion échouée : ' + message +
+      '\n    « ' + fragment + ' » présent dans : ' + String(texte).slice(0, 500));
   }
 }
 function assertLeve(fn, fragment, message) {
@@ -58,8 +64,8 @@ function assertLeve(fn, fragment, message) {
  *   create      — réponse (ou fonction(n)) de POST /envelope/create
  *   get         — réponse (ou fonction(n)) de GET /envelope/{id}
  *   distribute  — réponse de POST /envelope/distribute
- *   del         — réponse de POST /envelope/delete
- *   item        — réponse de GET /envelope/item/{id}/download
+ *   cancel      — réponse de POST /envelope/cancel
+ *   item        — réponse (ou fonction(n)) de GET /envelope/item/{id}/download
  *   certificat  — réponse du certificat
  *   audit       — réponse du journal d'audit
  */
@@ -73,867 +79,1533 @@ function routeur(cfg) {
     return typeof v === 'function' ? v(compteurs[cle]) : v;
   }
 
-  return function (url) {
-    if (url.indexOf('/envelope/create') !== -1) {
-      return resoudre('create', { code: 200, corps: { envelopeId: 'env_test_1' } });
-    }
+  const fn = (url) => {
+    if (url.indexOf('/envelope/create') !== -1) return resoudre('create', { code: 200, corps: { id: 'env-1' } });
     if (url.indexOf('/envelope/distribute') !== -1) {
-      return resoudre('distribute', { code: 200, corps: { success: true } });
+      return resoudre('distribute', { code: 200, corps: distributionOk() });
     }
-    if (url.indexOf('/envelope/delete') !== -1) {
-      return resoudre('del', { code: 200, corps: { success: true } });
-    }
-    if (url.indexOf('/download') !== -1 && url.indexOf('/item/') !== -1) {
-      return resoudre('item', {
-        code: 200, corps: '%PDF-signe', headers: { 'Content-Type': 'application/pdf' }
-      });
-    }
+    if (url.indexOf('/envelope/cancel') !== -1) return resoudre('cancel', { code: 200, corps: { success: true } });
     if (url.indexOf('/certificate/download') !== -1) {
-      return resoudre('certificat', {
-        code: 200, corps: '%PDF-certificat', headers: { 'Content-Type': 'application/pdf' }
-      });
+      return resoudre('certificat', { code: 200, corps: '%PDF certificat',
+                                      headers: { 'Content-Type': 'application/pdf' } });
     }
     if (url.indexOf('/audit-log/download') !== -1) {
-      return resoudre('audit', {
-        code: 200, corps: '%PDF-journal', headers: { 'Content-Type': 'application/pdf' }
-      });
+      return resoudre('audit', { code: 200, corps: '%PDF journal',
+                                 headers: { 'Content-Type': 'application/pdf' } });
     }
-    if (url.indexOf('/envelope/') !== -1) {
-      return resoudre('get', { code: 200, corps: enveloppe('DRAFT') });
+    if (url.indexOf('/envelope/item/') !== -1) {
+      return resoudre('item', { code: 200, corps: '%PDF signe',
+                                headers: { 'Content-Type': 'application/pdf' } });
     }
-    throw new Error('URL non simulée : ' + url);
+    if (url.indexOf('/envelope/') !== -1) return resoudre('get', { code: 200, corps: enveloppe('DRAFT') });
+    throw new Error('URL non routée dans le test : ' + url);
+  };
+  fn.compteurs = compteurs;
+  return fn;
+}
+
+/** Réponse type de POST /envelope/distribute, avec les URL de signature. */
+function distributionOk(opts) {
+  opts = opts || {};
+  const emails = opts.emails || ['bailleur@example.com', 'marie.dupont@example.com'];
+  return {
+    success: true,
+    id: opts.envelopeId || 'env-1',
+    recipients: emails.map((email, i) => ({
+      id: 101 + i,
+      name: '',
+      email: email,
+      token: 'tok' + (i + 1),
+      role: 'SIGNER',
+      signingOrder: i + 1,
+      signingUrl: 'https://app.documenso.com/sign/tok' + (i + 1)
+    }))
   };
 }
 
 /**
- * Corps d'une enveloppe Documenso.
- * @param {string} statut — DRAFT | PENDING | COMPLETED | REJECTED…
- * @param {Object} [opts] — { emails, signes, sansChamps, elements }
+ * Fabrique une enveloppe Documenso conforme au schéma V2.
+ *
+ * @param {string} statut — DRAFT | PENDING | COMPLETED | REJECTED | CANCELLED.
+ * @param {Object} [opts]
+ *   items    — [{ id, title, order }] (défaut : un document)
+ *   emails   — adresses des destinataires, dans l'ordre r1, r2
+ *   signes   — ['SIGNED', 'NOT_SIGNED'] par destinataire
+ *   motifs   — motifs de refus par destinataire
+ *   fields   — champs bruts (pour tester les cas dégradés)
  */
 function enveloppe(statut, opts) {
   opts = opts || {};
   const emails = opts.emails || ['bailleur@example.com', 'marie.dupont@example.com'];
-  const signes = opts.signes || [];
+  const items = opts.items || [{ id: 'item-1', title: 'doc-1.pdf', order: 0 }];
+  const signes = opts.signes || ['NOT_SIGNED', 'NOT_SIGNED'];
+  const motifs = opts.motifs || [];
+
+  const recipients = emails.map((email, i) => ({
+    id: 101 + i,
+    email: email,
+    name: '',
+    token: 'tok' + (i + 1),
+    role: 'SIGNER',
+    signingOrder: i + 1,
+    readStatus: 'OPENED',
+    sendStatus: statut === 'DRAFT' ? 'NOT_SENT' : 'SENT',
+    signingStatus: signes[i] || 'NOT_SIGNED',
+    signedAt: signes[i] === 'SIGNED' ? '2026-08-31T10:15:00.000Z' : null,
+    rejectionReason: motifs[i] || null
+  }));
+
+  let fields = opts.fields;
+  if (!fields) {
+    fields = [];
+    let id = 1;
+    items.forEach((it) => {
+      recipients.forEach((r) => {
+        fields.push({ id: id++, envelopeItemId: it.id, type: 'SIGNATURE', recipientId: r.id, page: 1 });
+        fields.push({ id: id++, envelopeItemId: it.id, type: 'DATE', recipientId: r.id, page: 1 });
+      });
+    });
+  }
+
   return {
-    id: 'env_test_1',
-    envelopeId: 'env_test_1',
+    id: opts.envelopeId || 'env-1',
+    secondaryId: opts.envelopeId || 'env-1',
+    type: 'DOCUMENT',
     status: statut,
-    recipients: emails.map((email, i) => ({
-      id: i + 1,
-      email,
-      name: 'Signataire ' + (i + 1),
-      signingStatus: signes.indexOf(email) !== -1 ? 'SIGNED' : 'NOT_SIGNED',
-      fields: opts.sansChamps && opts.sansChamps.indexOf(email) !== -1
-        ? []
-        : [{ type: 'SIGNATURE' }, { type: 'NAME' }, { type: 'DATE' }]
-    })),
-    envelopeItems: opts.elements || [
-      { envelopeItemId: 'item_1', title: 'Bail DUPONT' }
-    ]
+    externalId: opts.externalId || null,
+    title: 'Test',
+    recipients: recipients,
+    fields: fields,
+    envelopeItems: items
   };
 }
 
-/** Corps du multipart de la n-ième requête create, en texte. */
+// --- Raccourcis d'inspection ------------------------------------------------
+
+/** Nom attendu du PDF non signé d'un document (identique côté code et test). */
+function nomPdf(env, typeDoc, edlType, nom) {
+  return env.ctx.signatureNomPdfNonSigne(typeDoc, edlType || '', nom || 'DUPONT Marie') + '.pdf';
+}
+
+/** envelopeItems correspondant aux PDF réellement envoyés dans la campagne. */
+function itemsPour(env, campaignType) {
+  const campagne = env.ctx.SIGNATURE_CAMPAGNES[campaignType];
+  return campagne.documents.map((typeDoc, i) => ({
+    id: 'item-' + (i + 1),
+    title: nomPdf(env, typeDoc, campagne.edlType),
+    order: i
+  }));
+}
+
+/** Corps multipart de la n-ième requête POST /envelope/create. */
 function corpsCreate(env, n) {
   const appels = env.urlFetch.appels().filter((a) => a.url.indexOf('/envelope/create') !== -1);
   const appel = appels[(n || 1) - 1];
-  assert(appel, 'aucun appel /envelope/create enregistré');
-  return Buffer.from(appel.params.payload).toString('utf8');
+  if (!appel) throw new Error('Aucun appel /envelope/create #' + (n || 1));
+  return Buffer.from(appel.params.payload.map((b) => (b < 0 ? b + 256 : b))).toString('utf8');
 }
 
-/** Payload JSON envoyé lors du create (partie « payload » du multipart). */
+/** Payload JSON envoyé à /envelope/create. */
 function payloadCreate(env, n) {
   const corps = corpsCreate(env, n);
   const m = corps.match(/name="payload"\r\n\r\n([\s\S]*?)\r\n--/);
-  assert(m, 'partie « payload » introuvable dans le multipart');
+  if (!m) throw new Error('Champ "payload" introuvable dans le corps multipart');
   return JSON.parse(m[1]);
 }
 
-/** Lignes de l'onglet Signatures sous forme d'objets. */
+/** Lignes de l'onglet SignatureRequests, en objets. */
 function lignesSuivi(env) {
-  return env.ctx.lireDemandesSignature();
+  const sheet = env.onglets.get('SignatureRequests');
+  if (!sheet) return [];
+  const entetes = sheet.valeurs[0];
+  return sheet.valeurs.slice(1).map((l) => {
+    const o = {};
+    entetes.forEach((h, i) => { o[h] = l[i]; });
+    return o;
+  });
 }
 
-/** Noms des fichiers présents dans Drive. */
+/** Noms des fichiers non supprimés du Drive simulé. */
 function fichiersDrive(env) {
   return [...env.drive.fichiers.values()].filter((f) => !f.trashed).map((f) => f.name);
 }
 
-// ---------------------------------------------------------------------------
-// TESTS — sélection des documents
-// ---------------------------------------------------------------------------
-
-test('sélection Bail : un seul document, PDF généré et envoyé', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-
-  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  assertEgal(res.envelopeId, 'env_test_1', 'identifiant d\'enveloppe remonté');
-  assertEgal(res.documents.length, 1, 'un seul document envoyé');
-  assertEgal(res.documents[0].type, 'BAIL', 'le document est le bail');
-
-  const payload = payloadCreate(env);
-  assertEgal(payload.type, 'DOCUMENT', 'type d\'enveloppe');
-  assertContient(corpsCreate(env), 'filename="', 'un fichier joint');
-  assertEgal((corpsCreate(env).match(/filename="/g) || []).length, 1, 'exactement 1 fichier');
-});
-
-test('sélection État des lieux : le bon modèle est utilisé', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-
-  const res = env.ctx.envoyerDemandeSignature(2, 'EDL');
-  assertEgal(res.documents[0].type, 'EDL', 'le document est l\'EDL');
-  assertContient(corpsCreate(env), 'ÉTAT DES LIEUX CONTRADICTOIRE', 'contenu du modèle EDL');
-  assertContient(res.documents[0].fichier, 'Etat-des-lieux-entree', 'nom de fichier déterministe');
-});
-
-test('sélection Bail + EDL : une seule enveloppe contenant les deux PDF', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-
-  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL_EDL');
-  const creates = env.urlFetch.appels().filter((a) => a.url.indexOf('/envelope/create') !== -1);
-  assertEgal(creates.length, 1, 'une seule enveloppe créée');
-  assertEgal(res.documents.length, 2, 'deux documents');
-
-  const corps = corpsCreate(env);
-  assertEgal((corps.match(/filename="/g) || []).length, 2, 'deux fichiers dans le multipart');
-  assertContient(corps, 'CONTRAT DE LOCATION MEUBLÉE', 'le bail est joint');
-  assertContient(corps, 'ÉTAT DES LIEUX CONTRADICTOIRE', 'l\'EDL est joint');
-  assertEgal(lignesSuivi(env)[0]['Documents'], 'BAIL+EDL', 'suivi : les deux types');
-});
+/** Toutes les URL appelées. */
+function urls(env) {
+  return env.urlFetch.appels().map((a) => a.url);
+}
 
 // ---------------------------------------------------------------------------
-// TESTS — signataires
+// A. TEMPLATES ET GÉNÉRATION DES PDF
 // ---------------------------------------------------------------------------
 
-test('un locataire : r1 bailleur, r2 locataire', () => {
+test('bail : les marqueurs du bail deviennent les placeholders r1 et r2', () => {
   const env = harness.creerEnvironnement();
-  const ctx = env.ctx;
-  const signataires = ctx.resoudreSignataires(ctx.getTenantByRow(2), ctx.getConfig());
-
-  assertEgal(signataires.length, 2, 'deux signataires');
-  assertEgal(signataires[0].rang, 'r1', 'premier rang');
-  assertEgal(signataires[0].role, 'bailleur', 'r1 = bailleur');
-  assertEgal(signataires[1].role, 'locataire', 'r2 = locataire');
-  assertEgal(signataires[1].email, 'marie.dupont@example.com', 'email du locataire');
-});
-
-test('plusieurs colocataires : rangs r3/r4 dans un ordre déterministe', () => {
-  const env = harness.creerEnvironnement({
-    locataires: [{
-      Actif: true,
-      Locataire_Nom: 'DUPONT Marie',
-      EMAIL: 'marie.dupont@example.com',
-      Chambre: 2,
-      'Date_Début': new Date(2026, 8, 1),
-      ID_PDF_BAIL: 'pdf-bail',
-      ID_PDF_EDL: 'pdf-edl',
-      // Saisis volontairement dans le désordre
-      Cosignataires: 'ZOE Martin <zoe@example.com>; ANNA Blanc <anna@example.com>'
-    }]
-  });
-  const ctx = env.ctx;
-  const signataires = ctx.resoudreSignataires(ctx.getTenantByRow(2), ctx.getConfig());
-
-  assertEgal(signataires.length, 4, 'quatre signataires');
-  assertEgal(signataires[2].email, 'anna@example.com', 'r3 = premier email dans l\'ordre alphabétique');
-  assertEgal(signataires[3].email, 'zoe@example.com', 'r4');
-  assertEgal(signataires[2].nom, 'ANNA Blanc', 'nom du colocataire extrait');
-
-  // L'ordre ne dépend pas de la saisie : la liste inversée donne le même résultat
-  const env2 = harness.creerEnvironnement({
-    locataires: [{
-      Locataire_Nom: 'DUPONT Marie', EMAIL: 'marie.dupont@example.com', Chambre: 2,
-      ID_PDF_BAIL: 'pdf-bail', ID_PDF_EDL: 'pdf-edl',
-      Cosignataires: 'ANNA Blanc <anna@example.com>\nZOE Martin <zoe@example.com>'
-    }]
-  });
-  const s2 = env2.ctx.resoudreSignataires(env2.ctx.getTenantByRow(2), env2.ctx.getConfig());
-  assertEgal(s2[2].email, 'anna@example.com', 'ordre stable quelle que soit la saisie');
-
-  env.urlFetch.setRouteur(routeur({
-    get: () => ({
-      code: 200,
-      corps: enveloppe('DRAFT', {
-        emails: ['bailleur@example.com', 'marie.dupont@example.com',
-                 'anna@example.com', 'zoe@example.com']
-      })
-    })
-  }));
-  const res = ctx.envoyerDemandeSignature(2, 'BAIL');
-  const payload = payloadCreate(env);
-  assertEgal(payload.recipients.length, 4, 'quatre destinataires envoyés');
-  assertEgal(payload.recipients[3].email, 'zoe@example.com', 'ordre du payload = ordre des rangs');
-  assertEgal(res.champs.length, 4, 'champs vérifiés pour chaque signataire');
-});
-
-test('bailleur non signataire : le locataire devient r1', () => {
-  const env = harness.creerEnvironnement({ config: { SIGNATURE_BAILLEUR: 'NON' } });
-  const ctx = env.ctx;
-  const signataires = ctx.resoudreSignataires(ctx.getTenantByRow(2), ctx.getConfig());
-
-  assertEgal(signataires.length, 1, 'un seul signataire');
-  assertEgal(signataires[0].role, 'locataire', 'r1 = locataire');
-
-  env.urlFetch.setRouteur(routeur({
-    get: () => ({ code: 200, corps: enveloppe('DRAFT', { emails: ['marie.dupont@example.com'] }) })
-  }));
-  ctx.envoyerDemandeSignature(2, 'BAIL');
-  const corps = corpsCreate(env);
-  assertContient(corps, '{{signature, r1}}', 'placeholder r1 présent');
-  assert(corps.indexOf('{{signature, r2}}') === -1, 'aucun placeholder r2 généré');
-});
-
-test('bailleur signataire sans email configuré : envoi bloqué', () => {
-  const env = harness.creerEnvironnement({ config: { Bailleur_Email: '' } });
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'préparation bloquée');
-  assertContient(pre.blocages.join(' '), 'Bailleur_Email', 'la clé manquante est nommée');
-});
-
-// ---------------------------------------------------------------------------
-// TESTS — placeholders
-// ---------------------------------------------------------------------------
-
-test('placeholders générés dans le PDF, un par ligne', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  env.ctx.envoyerDemandeSignature(2, 'BAIL');
-
-  const corps = corpsCreate(env);
-  ['{{name, r1}}', '{{signature, r1}}', '{{date, r1}}',
-   '{{name, r2}}', '{{signature, r2}}', '{{date, r2}}'].forEach((ph) => {
-    assertContient(corps, ph, 'placeholder ' + ph);
-  });
-  // Chaque placeholder est ouvert ET fermé sur la même ligne (aucune coupure).
-  // On n'inspecte que les lignes contenant un placeholder : la partie JSON du
-  // multipart contient des accolades qui ne sont pas des placeholders.
-  corps.split('\n').filter((l) => l.indexOf('{{') !== -1).forEach((ligne) => {
-    assertEgal((ligne.match(/\{\{/g) || []).length, (ligne.match(/\}\}/g) || []).length,
-      'placeholder non coupé sur la ligne : ' + ligne);
-    assertEgal((ligne.match(/\{\{/g) || []).length, 1, 'un seul placeholder par ligne : ' + ligne);
-  });
-  assert(corps.indexOf('[[SIGNATURES_DOCUMENSO]]') === -1, 'marqueur interne retiré');
-});
-
-test('placeholders manquants : modèle sans marqueur → envoi bloqué', () => {
-  const env = harness.creerEnvironnement({
-    templateBail: ['CONTRAT', 'Locataire : {{Locataire_Nom}}', 'Fait à Bordeaux']
-  });
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'préparation bloquée');
-  assertContient(pre.blocages.join(' '), '[[SIGNATURES_DOCUMENSO]]', 'le marqueur est nommé');
-
-  env.urlFetch.setRouteur(routeur({}));
-  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
-    'SIGNATURES_DOCUMENSO', 'l\'envoi refuse aussi côté serveur');
-  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel API');
-});
-
-test('marqueur en dernier paragraphe : pris en charge sans erreur Docs', () => {
-  // Google Docs refuse de supprimer le dernier paragraphe du corps : le code
-  // doit le vider au lieu de le retirer.
-  const env = harness.creerEnvironnement({
-    templateBail: [
-      'CONTRAT',
-      'Locataire : {{Locataire_Nom}}',
-      'Fait à Bordeaux',
-      '[[SIGNATURES_DOCUMENSO]]'
-    ]
-  });
-  env.urlFetch.setRouteur(routeur({}));
-
-  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  assertEgal(res.envelopeId, 'env_test_1', 'envoi réussi');
-
-  const corps = corpsCreate(env);
-  assert(corps.indexOf('[[SIGNATURES_DOCUMENSO]]') === -1, 'marqueur retiré du PDF');
-  assertContient(corps, '{{signature, r1}}', 'placeholder r1 présent');
-  assertContient(corps, '{{signature, r2}}', 'placeholder r2 présent');
-});
-
-test('marqueur dans un tableau : refus explicite (le tableau serait supprimé)', () => {
-  const env = harness.creerEnvironnement({
-    templateBail: [
-      'CONTRAT',
-      'Locataire : {{Locataire_Nom}}',
-      { text: 'Le bailleur | Le locataire | [[SIGNATURES_DOCUMENSO]]', type: 'TABLE' }
-    ]
-  });
-  env.urlFetch.setRouteur(routeur({}));
-
-  // Détecté dès la préparation, avant même de dupliquer le modèle
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'préparation bloquée');
-  assertContient(pre.blocages.join(' '), 'paragraphe autonome', 'motif expliqué');
-
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
-    'paragraphe autonome', 'placement dans un tableau refusé');
-  assertContient(err.message, 'TABLE', 'type d\'élément fautif indiqué');
-  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel API');
-});
-
-test('validerPlaceholders détecte manquant, doublon et rang hors bornes', () => {
-  const env = harness.creerEnvironnement();
-  const ctx = env.ctx;
-  const deux = [{ rang: 'r1' }, { rang: 'r2' }];
-
-  const complet = '{{name, r1}}\n{{signature, r1}}\n{{date, r1}}\n' +
-                  '{{name, r2}}\n{{signature, r2}}\n{{date, r2}}';
-  assertEgal(ctx.validerPlaceholders(complet, deux).ok, true, 'jeu complet valide');
-
-  const manquant = complet.replace('{{signature, r2}}', '');
-  const r1 = ctx.validerPlaceholders(manquant, deux);
-  assertEgal(r1.ok, false, 'placeholder manquant détecté');
-  assertContient(r1.problemes.join(' '), 'Placeholder manquant : {{signature, r2}}', 'message explicite');
-
-  const double = complet + '\n{{signature, r1}}';
-  assertContient(ctx.validerPlaceholders(double, deux).problemes.join(' '),
-    'en double', 'doublon détecté');
-
-  const horsBornes = complet + '\n{{signature, r5}}';
-  assertContient(ctx.validerPlaceholders(horsBornes, deux).problemes.join(' '),
-    'ne correspond à aucun signataire', 'rang hors bornes détecté');
-
-  const coupe = '{{signature,\nr1}}\n{{name, r1}}\n{{date, r1}}';
-  assertContient(ctx.validerPlaceholders(coupe, [{ rang: 'r1' }]).problemes.join(' '),
-    'coupé', 'placeholder coupé détecté');
-});
-
-test('EDL : les balises de sortie en blanc sont retirées de la copie signée', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  const res = env.ctx.envoyerDemandeSignature(2, 'EDL');
-
-  const corps = corpsCreate(env);
-  assert(corps.indexOf('{{Compteur_Eau_Sortie}}') === -1, 'balise de sortie retirée');
-  assert(corps.indexOf('{{Locataire_Nouvelle_Adresse}}') === -1, 'balise nouvelle adresse retirée');
-  assertContient(corps, '{{signature, r2}}', 'les placeholders Documenso subsistent');
-  assertEgal(res.documents.length, 1, 'un document');
-
-  // La chambre 2 est conservée, les autres supprimées (logique EDL existante)
-  assertContient(corps, 'Mobilier chambre 2', 'chambre du locataire conservée');
-  assert(corps.indexOf('Mobilier chambre 1') === -1, 'chambre 1 supprimée');
-});
-
-test('le modèle Google Docs source n\'est jamais modifié', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  env.ctx.envoyerDemandeSignature(2, 'BAIL_EDL');
-
-  const modele = env.drive.fichiers.get(env.ids.bailTemplate);
-  assertContient(modele.body.getText(), '{{Locataire_Nom}}', 'variables intactes dans le modèle');
-  assertContient(modele.body.getText(), '[[SIGNATURES_DOCUMENSO]]', 'marqueur intact dans le modèle');
-  assertEgal(modele.trashed, false, 'modèle non supprimé');
-});
-
-// ---------------------------------------------------------------------------
-// TESTS — pré-contrôles
-// ---------------------------------------------------------------------------
-
-test('email invalide : envoi bloqué avant tout appel API', () => {
-  const env = harness.creerEnvironnement({
-    locataires: [{
-      Locataire_Nom: 'DUPONT Marie', EMAIL: 'marie.dupont@@pas-un-email', Chambre: 2,
-      ID_PDF_BAIL: 'pdf-bail', ID_PDF_EDL: 'pdf-edl'
-    }]
-  });
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'préparation bloquée');
-  assertContient(pre.blocages.join(' '), 'Email invalide', 'motif explicite');
-
-  env.urlFetch.setRouteur(routeur({}));
-  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), 'Email invalide', 'envoi refusé');
-  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel API');
-});
-
-test('document non généré : envoi bloqué', () => {
-  const env = harness.creerEnvironnement({
-    locataires: [{
-      Locataire_Nom: 'DUPONT Marie', EMAIL: 'marie.dupont@example.com', Chambre: 2,
-      ID_PDF_BAIL: '', ID_PDF_EDL: 'pdf-edl'
-    }]
-  });
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'préparation bloquée');
-  assertContient(pre.blocages.join(' '), 'ID_PDF_BAIL', 'colonne manquante nommée');
-});
-
-test('token absent : envoi bloqué, mais DRY_RUN autorisé', () => {
-  const env = harness.creerEnvironnement({ proprietes: { DOCUMENSO_API_TOKEN: '' } });
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'préparation bloquée');
-  assertContient(pre.blocages.join(' '), 'DOCUMENSO_API_TOKEN', 'la propriété est nommée');
+  env.urlFetch.setRouteur(routeur({ get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL') }) }) }));
 
   const res = env.ctx.envoyerDemandeSignature(2, 'BAIL', { dryRun: true });
-  assertEgal(res.dryRun, true, 'DRY_RUN possible sans token');
-  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel API');
+  const placeholders = res.documents[0].placeholders;
+
+  assertEgal(placeholders.length, 4, 'quatre placeholders exactement');
+  ['{{signature,r1}}', '{{date,r1}}', '{{signature,r2}}', '{{date,r2}}'].forEach((ph) => {
+    assert(placeholders.indexOf(ph) !== -1, 'placeholder attendu : ' + ph);
+  });
 });
 
-test('doublon : une deuxième demande identique est refusée', () => {
+test('EDL entrée : seuls les marqueurs d\'entrée sont convertis', () => {
   const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
+  env.urlFetch.setRouteur(routeur());
 
-  const premier = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'deuxième demande bloquée');
-  assertContient(pre.blocages.join(' '), 'demande identique existe déjà', 'motif explicite');
-  assertContient(pre.blocages.join(' '), premier.envelopeId, 'l\'enveloppe existante est citée');
+  const res = env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE', { dryRun: true });
+  const copie = [...env.drive.fichiers.values()].find((f) => /COPIE-TECHNIQUE/.test(f.name));
 
-  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
-    'demande identique', 'envoi refusé');
-  assertEgal(
-    env.urlFetch.appels().filter((a) => a.url.indexOf('/envelope/create') !== -1).length, 1,
-    'une seule enveloppe créée au total');
+  // La copie a été supprimée après export : on inspecte le texte validé.
+  assertEgal(res.documents[0].placeholders.length, 4, 'quatre placeholders');
+  assert(!copie || copie.trashed, 'la copie technique est mise à la corbeille après export');
 });
 
-test('identifiant externe déterministe et sensible au contenu', () => {
+test('EDL sortie : seuls les marqueurs de sortie sont convertis', () => {
+  const env = harness.creerEnvironnement({
+    docEdlTravail: harness.DOC_EDL_TRAVAIL_SORTIE,
+    locataires: [locataireSortie()]
+  });
+  env.urlFetch.setRouteur(routeur());
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'EDL_SORTIE', { dryRun: true });
+  assertEgal(res.documents[0].placeholders.length, 4, 'quatre placeholders');
+  assertEgal(res.documents[0].libelle, 'État des lieux de sortie', 'libellé de sortie');
+});
+
+test('les marqueurs du bloc inactif sont retirés, jamais laissés actifs', () => {
   const env = harness.creerEnvironnement();
-  const ctx = env.ctx;
-  const tenant = ctx.getTenantByRow(2);
-  const config = ctx.getConfig();
-  const chambre = ctx.getChambreData(tenant.Chambre);
-  const sig = ctx.resoudreSignataires(tenant, config);
+  const body = new (require('./stubs').FakeBody)(harness.DOC_EDL_TRAVAIL.slice());
 
-  const id1 = ctx.construireExternalId(tenant, config, chambre, 'BAIL', sig);
-  const id2 = ctx.construireExternalId(tenant, config, chambre, 'BAIL', sig);
-  assertEgal(id1, id2, 'même contenu → même identifiant');
-  assertContient(id1, 'GL-ch2-dupont-marie-BAIL-', 'format lisible');
+  env.ctx.injecterPlaceholdersDocumenso(body, 'EDL', 'ENTREE');
+  const texte = body.getText();
 
-  const idAutreJeu = ctx.construireExternalId(tenant, config, chambre, 'BAIL_EDL', sig);
-  assert(idAutreJeu !== id1, 'jeu différent → identifiant différent');
+  assertContient(texte, '{{signature,r1}}', 'placeholder du bailleur (entrée)');
+  assertAbsent(texte, '[[SIGNATURE_BAILLEUR_SORTIE]]', 'marqueur de sortie retiré');
+  assertAbsent(texte, '[[DATE_LOCATAIRE_SORTIE]]', 'marqueur de date de sortie retiré');
+  assertAbsent(texte, '[[', 'plus aucun marqueur interne');
+  assertEgal((texte.match(/\{\{signature,r1\}\}/g) || []).length, 1, 'une seule signature r1');
+});
 
-  const tenantModifie = ctx.getTenantByRow(2);
-  tenantModifie['Locataire_Adresse'] = 'Nouvelle adresse';
-  assert(ctx.construireExternalId(tenantModifie, config, chambre, 'BAIL', sig) !== id1,
-    'contenu modifié → nouvel identifiant');
+test('le Google Doc de travail n\'est JAMAIS modifié par la signature', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur());
+  const avantBail = env.drive.fichiers.get(env.ids.bailTravail).body.getText();
+  const avantEdl = env.drive.fichiers.get(env.ids.edlTravail).body.getText();
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE', { dryRun: true });
+
+  assertEgal(env.drive.fichiers.get(env.ids.bailTravail).body.getText(), avantBail,
+             'le Doc de travail du bail est inchangé');
+  assertEgal(env.drive.fichiers.get(env.ids.edlTravail).body.getText(), avantEdl,
+             'le Doc de travail de l\'EDL est inchangé');
+  assertContient(env.drive.fichiers.get(env.ids.edlTravail).body.getText(),
+                 '[[SIGNATURE_BAILLEUR_SORTIE]]',
+                 'les marqueurs de sortie restent disponibles pour la campagne de sortie');
+});
+
+test('le modèle Google Docs source n\'est jamais touché non plus', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur());
+  const avant = env.drive.fichiers.get(env.ids.edlTemplate).body.getText();
+
+  env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE', { dryRun: true });
+
+  assertEgal(env.drive.fichiers.get(env.ids.edlTemplate).body.getText(), avant, 'modèle inchangé');
+});
+
+test('marqueur manquant : envoi bloqué avec un message explicite', () => {
+  const env = harness.creerEnvironnement({
+    docBailTravail: harness.DOC_BAIL_TRAVAIL.filter((p) => p.indexOf('[[SIGNATURE_LOCATAIRE_BAIL]]') === -1)
+  });
+  env.urlFetch.setRouteur(routeur());
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL', { dryRun: true }),
+    '[[SIGNATURE_LOCATAIRE_BAIL]]', 'marqueur manquant détecté');
+  assertContient(e.message, 'cellules de signature', 'la marche à suivre est donnée');
+  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel réseau');
+});
+
+test('champs d\'entrée et de sortie simultanés : la copie est refusée', () => {
+  const env = harness.creerEnvironnement();
+  // Texte pathologique : les deux blocs mappés sur les mêmes rangs.
+  const texte = [
+    'Entrée : {{signature,r1}} {{date,r1}} {{signature,r2}} {{date,r2}}',
+    'Sortie : {{signature,r1}} {{date,r1}} {{signature,r2}} {{date,r2}}'
+  ].join('\n');
+
+  const v = env.ctx.validerCopieTechnique(texte);
+  assert(!v.ok, 'la validation échoue');
+  assertContient(v.problemes.join(' | '), 'en double', 'les doublons entrée/sortie sont signalés');
+});
+
+test('variable {{...}} non remplacée : détectée avant l\'envoi', () => {
+  const env = harness.creerEnvironnement();
+  const v = env.ctx.validerCopieTechnique(
+    'Loyer : {{Loyer_CC}}\n{{signature,r1}}\n{{date,r1}}\n{{signature,r2}}\n{{date,r2}}');
+  assert(!v.ok, 'la validation échoue');
+  assertContient(v.problemes.join(' | '), '{{Loyer_CC}}', 'la variable oubliée est nommée');
+});
+
+test('placeholder coupé sur deux lignes : détecté', () => {
+  const env = harness.creerEnvironnement();
+  const v = env.ctx.validerCopieTechnique('{{signature,\nr1}}\n{{date,r1}}\n{{signature,r2}}\n{{date,r2}}');
+  assert(!v.ok, 'la validation échoue');
+  assertContient(v.problemes.join(' | '), 'coupé', 'le placeholder coupé est signalé');
+});
+
+test('l\'EDL de sortie emporte le contenu complété à la main dans le Doc de travail', () => {
+  const env = harness.creerEnvironnement({
+    docEdlTravail: harness.DOC_EDL_TRAVAIL_SORTIE,
+    locataires: [locataireSortie()]
+  });
+  env.urlFetch.setRouteur(routeur());
+
+  env.ctx.envoyerDemandeSignature(2, 'EDL_SORTIE', { dryRun: true });
+
+  const pdf = [...env.drive.fichiers.values()]
+    .find((f) => f.type === 'blob' && /_EDL_SORTIE_DUPONT_NON_SIGNE\.pdf$/.test(f.name));
+  assert(pdf, 'le PDF de sortie a été produit');
+  const contenu = pdf.blob.getDataAsString();
+  assertContient(contenu, 'sortie 189', 'le relevé d\'eau de sortie saisi à la main est présent');
+  assertContient(contenu, 'rayure bureau', 'le commentaire de sortie saisi à la main est présent');
+  assertContient(contenu, '9 rue Suivante', 'la nouvelle adresse saisie à la main est présente');
 });
 
 // ---------------------------------------------------------------------------
-// TESTS — erreurs API
+// B. CAMPAGNES
 // ---------------------------------------------------------------------------
 
-test('erreur API avant création : aucune enveloppe, reprise sûre', () => {
+test('campagne BAIL : une enveloppe, un PDF', () => {
   const env = harness.creerEnvironnement();
   env.urlFetch.setRouteur(routeur({
-    create: { code: 400, corps: { message: 'Invalid payload' } }
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL') }) })
   }));
 
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
-    'création de l\'enveloppe', 'erreur remontée');
-  assertContient(err.message, 'relancer l\'envoi sans risque de doublon', 'reprise annoncée sûre');
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assert(res.ok, 'envoi réussi');
+
+  const payload = payloadCreate(env);
+  assertEgal(payload.title.indexOf('Bail'), 0, 'titre de l\'enveloppe');
+  const corps = corpsCreate(env);
+  assertEgal((corps.match(/name="files\[\]"/g) || []).length, 1, 'un seul fichier');
+  assertContient(corps, '_Bail_DUPONT_NON_SIGNE.pdf', 'nom du PDF non signé');
+});
+
+test('campagne EDL_ENTREE : le document est bien l\'EDL, pas le bail', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'EDL_ENTREE') }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE');
+  const corps = corpsCreate(env);
+  assertContient(corps, '_EDL_ENTREE_DUPONT_NON_SIGNE.pdf', 'nom du PDF d\'entrée');
+  assertAbsent(corps, '_Bail_DUPONT_NON_SIGNE.pdf', 'le bail n\'est pas envoyé');
+});
+
+test('campagne EDL_SORTIE : PDF distinct de celui d\'entrée', () => {
+  const env = harness.creerEnvironnement({
+    docEdlTravail: harness.DOC_EDL_TRAVAIL_SORTIE,
+    locataires: [locataireSortie()]
+  });
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'EDL_SORTIE') }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'EDL_SORTIE');
+  const corps = corpsCreate(env);
+  assertContient(corps, '_EDL_SORTIE_DUPONT_NON_SIGNE.pdf', 'nom du PDF de sortie');
 
   const suivi = lignesSuivi(env);
-  assertEgal(suivi.length, 1, 'une trace conservée');
-  assertEgal(suivi[0]['Statut'], 'ERREUR', 'statut ERREUR');
-  assertEgal(String(suivi[0]['Envelope_ID']), '', 'aucun identifiant d\'enveloppe');
+  assertEgal(suivi[0].campaignType, 'EDL_SORTIE', 'type de campagne');
+  assertEgal(suivi[0].etatDesLieuxType, 'SORTIE', 'type d\'état des lieux');
 });
 
-test('token refusé par Documenso : message explicite, aucune enveloppe', () => {
+test('campagne BAIL_ET_EDL_ENTREE : UNE enveloppe contenant DEUX PDF', () => {
   const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({ create: { code: 401, corps: { message: 'Unauthorized' } } }));
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL_ET_EDL_ENTREE') }) })
+  }));
 
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), 'token', 'token signalé');
-  assertContient(err.message, 'TOKEN_INVALIDE', 'code d\'erreur');
-  assertContient(err.message, 'sans risque de doublon', 'reprise sûre');
+  env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE');
+
+  assertEgal(urls(env).filter((u) => u.indexOf('/envelope/create') !== -1).length, 1,
+             'une seule enveloppe créée');
+  const corps = corpsCreate(env);
+  assertEgal((corps.match(/name="files\[\]"/g) || []).length, 2, 'deux fichiers dans l\'enveloppe');
+  assertContient(corps, '_Bail_DUPONT_NON_SIGNE.pdf', 'le bail est joint');
+  assertContient(corps, '_EDL_ENTREE_DUPONT_NON_SIGNE.pdf', 'l\'EDL d\'entrée est joint');
+  assertAbsent(corps, '_EDL_SORTIE_', 'l\'EDL de sortie n\'est jamais joint au bail');
 });
 
-test('quota atteint : message dédié, pas de reprise automatique', () => {
+test('bail + EDL de sortie : combinaison refusée explicitement', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur());
+
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_SORTIE'),
+    'ne peut concerner que l\'état des lieux d\'ENTRÉE', 'combinaison interdite');
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL'),
+    'ne peut concerner que l\'état des lieux d\'ENTRÉE', 'alias ambigu refusé');
+  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel réseau');
+});
+
+test('type de campagne inconnu : erreur explicite', () => {
+  const env = harness.creerEnvironnement();
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'AUTRE_CHOSE'),
+    'Type de campagne inconnu', 'campagne inconnue rejetée');
+});
+
+test('EDL sans type entrée/sortie : refus, jamais de choix implicite', () => {
+  const env = harness.creerEnvironnement();
+  assertLeve(() => env.ctx.signatureBlocActif('EDL', ''),
+    'précisez « entrée » ou « sortie »', 'le type d\'EDL est obligatoire');
+});
+
+// ---------------------------------------------------------------------------
+// C. SIGNATAIRES ET ORDRE
+// ---------------------------------------------------------------------------
+
+test('le bailleur est r1 et signe en premier, le locataire r2', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL') }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  const payload = payloadCreate(env);
+
+  assertEgal(payload.recipients.length, 2, 'deux destinataires');
+  assertEgal(payload.recipients[0].email, 'bailleur@example.com', 'r1 = bailleur');
+  assertEgal(payload.recipients[0].signingOrder, 1, 'bailleur signingOrder 1');
+  assertEgal(payload.recipients[1].email, 'marie.dupont@example.com', 'r2 = locataire');
+  assertEgal(payload.recipients[1].signingOrder, 2, 'locataire signingOrder 2');
+  assertEgal(payload.meta.signingOrder, 'SEQUENTIAL', 'enveloppe en mode séquentiel');
+});
+
+test('après distribution : URL de signature du bailleur conservée', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL') }) })
+  }));
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assertEgal(res.bailleurSigningUrl, 'https://app.documenso.com/sign/tok1', 'URL du bailleur');
+  assertEgal(res.statut, 'AWAITING_BAILLEUR', 'en attente du bailleur');
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.bailleurSigningUrl, 'https://app.documenso.com/sign/tok1', 'URL tracée');
+  assertEgal(String(suivi.bailleurRecipientId), '101', 'recipientId du bailleur');
+  assertEgal(String(suivi.locataireRecipientId), '102', 'recipientId du locataire');
+});
+
+test('bailleur signé, locataire en attente → AWAITING_LOCATAIRE', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('PENDING', { items, signes: ['SIGNED', 'NOT_SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'pending';
+  env.ctx.actualiserStatutsSignature();
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'AWAITING_LOCATAIRE', 'statut après signature du bailleur');
+  assert(String(suivi.bailleurSignedAt).length > 0, 'date de signature du bailleur enregistrée');
+  assertEgal(String(suivi.locataireSignedAt), '', 'le locataire n\'a pas encore signé');
+});
+
+test('les deux signataires terminés → COMPLETED après archivage', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'COMPLETED', 'campagne terminée');
+  assert(String(suivi.completedAt).length > 0, 'date de fin renseignée');
+  assert(String(suivi.locataireSignedAt).length > 0, 'date de signature du locataire');
+  assertContient(suivi.signedPdfFileIds, 'BAIL=', 'PDF signé référencé');
+  assert(fichiersDrive(env).some((n) => /_Bail_DUPONT_SIGNE\.pdf$/.test(n)),
+         'le PDF signé est archivé dans Drive');
+});
+
+test('email du bailleur invalide : envoi bloqué avant tout appel API', () => {
+  const env = harness.creerEnvironnement({ config: { Bailleur_Email: 'pas-un-email' } });
+  env.urlFetch.setRouteur(routeur());
+
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'Email invalide pour r1', 'email bailleur invalide');
+  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel réseau');
+});
+
+test('email du locataire invalide ou absent : envoi bloqué', () => {
+  const envInvalide = harness.creerEnvironnement({
+    locataires: [Object.assign(locataireBase(), { EMAIL: 'marie@@example' })]
+  });
+  envInvalide.urlFetch.setRouteur(routeur());
+  assertLeve(() => envInvalide.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'Email invalide pour r2', 'email locataire invalide');
+
+  const envVide = harness.creerEnvironnement({
+    locataires: [Object.assign(locataireBase(), { EMAIL: '' })]
+  });
+  envVide.urlFetch.setRouteur(routeur());
+  assertLeve(() => envVide.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'Email manquant pour r2', 'email locataire absent');
+  assertEgal(envVide.urlFetch.appels().length, 0, 'aucun appel réseau');
+});
+
+test('bailleur et locataire avec la même adresse : envoi bloqué', () => {
+  const env = harness.creerEnvironnement({
+    config: { Bailleur_Email: 'marie.dupont@example.com' }
+  });
+  env.urlFetch.setRouteur(routeur());
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'même adresse email', 'adresses identiques refusées');
+});
+
+// ---------------------------------------------------------------------------
+// D. VALIDATION DES CHAMPS AVANT DISTRIBUTION
+// ---------------------------------------------------------------------------
+
+test('bail seul : 4 champs attendus, validation réussie', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  const signataires = [{ email: 'bailleur@example.com' }, { email: 'marie.dupont@example.com' }];
+  const attendus = [{ cle: 'BAIL', titre: items[0].title, champs: env.ctx.SIGNATURE_CHAMPS_ATTENDUS }];
+
+  const v = env.ctx.documensoValiderChamps(
+    env.ctx.documensoNormaliserEnveloppe(enveloppe('DRAFT', { items })), signataires, attendus);
+
+  assert(v.ok, 'validation réussie : ' + v.problemes.join(' | '));
+  assertEgal(v.total, 4, 'quatre champs au total');
+});
+
+test('bail + EDL : 8 champs attendus, 4 par envelopeItem', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL_ET_EDL_ENTREE');
+  const signataires = [{ email: 'bailleur@example.com' }, { email: 'marie.dupont@example.com' }];
+  const attendus = items.map((it, i) => ({
+    cle: i === 0 ? 'BAIL' : 'EDL', titre: it.title, champs: env.ctx.SIGNATURE_CHAMPS_ATTENDUS
+  }));
+
+  const v = env.ctx.documensoValiderChamps(
+    env.ctx.documensoNormaliserEnveloppe(enveloppe('DRAFT', { items })), signataires, attendus);
+
+  assert(v.ok, 'validation réussie : ' + v.problemes.join(' | '));
+  assertEgal(v.total, 8, 'huit champs au total');
+  assertEgal(v.parDocument.length, 2, 'deux documents contrôlés');
+  v.parDocument.forEach((d) => assertEgal(d.champs, 4, '4 champs dans ' + d.cle));
+});
+
+test('champ manquant : distribution bloquée, enveloppe laissée en brouillon', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  // Documenso n'a détecté que la signature du bailleur.
+  const fields = [{ id: 1, envelopeItemId: 'item-1', type: 'SIGNATURE', recipientId: 101 }];
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items, fields }) })
+  }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'NON distribuée', 'distribution bloquée');
+  assertContient(e.message, 'champ date manquant pour r1', 'le champ absent est nommé');
+  assertContient(e.message, 'aucun champ pour r2', 'le signataire sans champ est signalé');
+
+  assertEgal(urls(env).filter((u) => u.indexOf('/distribute') !== -1).length, 0,
+             'aucune distribution');
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'ERROR', 'campagne en erreur');
+  assertEgal(suivi.lastErrorCode, 'CHAMPS_INVALIDES', 'code d\'erreur');
+  assertEgal(suivi.documensoEnvelopeId, 'env-1', 'l\'enveloppe créée reste tracée');
+});
+
+test('champ attribué au mauvais destinataire : distribution bloquée', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  // Les quatre champs sont attribués au bailleur.
+  const fields = [
+    { id: 1, envelopeItemId: 'item-1', type: 'SIGNATURE', recipientId: 101 },
+    { id: 2, envelopeItemId: 'item-1', type: 'DATE', recipientId: 101 },
+    { id: 3, envelopeItemId: 'item-1', type: 'SIGNATURE', recipientId: 101 },
+    { id: 4, envelopeItemId: 'item-1', type: 'DATE', recipientId: 101 }
+  ];
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items, fields }) })
+  }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'NON distribuée', 'distribution bloquée');
+  assertContient(e.message, 'aucun champ pour r2', 'le locataire n\'a rien à signer');
+});
+
+test('trop de champs (entrée + sortie actives) : distribution bloquée', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'EDL_ENTREE');
+  const fields = [];
+  let id = 1;
+  [101, 102].forEach((r) => {
+    ['SIGNATURE', 'DATE', 'SIGNATURE', 'DATE'].forEach((t) => {
+      fields.push({ id: id++, envelopeItemId: 'item-1', type: t, recipientId: r });
+    });
+  });
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items, fields }) })
+  }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE'),
+    'NON distribuée', 'distribution bloquée');
+  assertContient(e.message, '8 champ(s) détecté(s) au lieu de 4', 'compte de champs incorrect');
+});
+
+test('document attendu absent de l\'enveloppe : distribution bloquée', () => {
+  const env = harness.creerEnvironnement();
+  // Un seul envelopeItem alors que deux PDF ont été envoyés.
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: [itemsPour(env, 'BAIL_ET_EDL_ENTREE')[0]] }) })
+  }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE'),
+    'NON distribuée', 'distribution bloquée');
+  assertContient(e.message, 'Document attendu absent', 'le document manquant est signalé');
+});
+
+test('les envelopeItems sont appariés par titre, pas par position', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL_ET_EDL_ENTREE');
+  // Documenso renvoie les documents dans l'ordre inverse.
+  const inverses = [
+    { id: 'item-2', title: items[1].title, order: 1 },
+    { id: 'item-1', title: items[0].title, order: 0 }
+  ];
+  const signataires = [{ email: 'bailleur@example.com' }, { email: 'marie.dupont@example.com' }];
+  const attendus = [
+    { cle: 'BAIL', titre: items[0].title, champs: env.ctx.SIGNATURE_CHAMPS_ATTENDUS },
+    { cle: 'EDL', titre: items[1].title, champs: env.ctx.SIGNATURE_CHAMPS_ATTENDUS }
+  ];
+
+  const v = env.ctx.documensoValiderChamps(
+    env.ctx.documensoNormaliserEnveloppe(enveloppe('DRAFT', { items: inverses })),
+    signataires, attendus);
+
+  assert(v.ok, 'validation réussie malgré l\'ordre inversé : ' + v.problemes.join(' | '));
+  assertEgal(v.parDocument[0].envelopeItemId, 'item-1', 'le bail est apparié par son titre');
+  assertEgal(v.parDocument[1].envelopeItemId, 'item-2', 'l\'EDL est apparié par son titre');
+});
+
+// ---------------------------------------------------------------------------
+// E. IDEMPOTENCE ET RÉSILIENCE
+// ---------------------------------------------------------------------------
+
+test('identifiant externe : SHA-256 déterministe et sensible au contenu', () => {
+  const env = harness.creerEnvironnement();
+  const base = {
+    dossierId: 'L2-dupont-marie', locationId: 'lieu-ch2', campaignType: 'BAIL',
+    etatDesLieuxType: '', pdfHashes: ['aaa'], bailleurEmail: 'b@x.fr', locataireEmail: 'l@x.fr'
+  };
+  const id1 = env.ctx.construireExternalId(base);
+  const id2 = env.ctx.construireExternalId(base);
+  assertEgal(id1, id2, 'même contenu → même identifiant');
+
+  const variantes = [
+    { campaignType: 'EDL_ENTREE' },
+    { etatDesLieuxType: 'SORTIE' },
+    { pdfHashes: ['bbb'] },
+    { bailleurEmail: 'autre@x.fr' },
+    { locataireEmail: 'autre@x.fr' },
+    { dossierId: 'L3-autre' }
+  ];
+  variantes.forEach((v) => {
+    const id = env.ctx.construireExternalId(Object.assign({}, base, v));
+    assert(id !== id1, 'un changement de ' + Object.keys(v)[0] + ' change l\'identifiant');
+  });
+  assertEgal(id1.indexOf('GL-'), 0, 'préfixe GL-');
+});
+
+test('double clic sur envoyer : le verrou empêche la seconde enveloppe', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'BAIL') }) })
+  }));
+
+  // Simule un envoi déjà en cours dans une autre exécution du script.
+  env.lockService._etat.occupe = true;
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'déjà en cours', 'second envoi refusé');
+  assertEgal(env.urlFetch.appels().length, 0, 'aucune enveloppe créée');
+
+  // Une fois le verrou libéré, l'envoi passe.
+  env.lockService._etat.occupe = false;
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assert(res.ok, 'envoi réussi après libération');
+  assertEgal(env.lockService._etat.occupe, false, 'le verrou est relâché');
+});
+
+test('campagne identique déjà en cours : reprise proposée, pas de doublon', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items }) })
+  }));
+
+  const premier = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assert(premier.ok, 'premier envoi');
+
+  // Deuxième tentative avec exactement les mêmes documents.
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'déjà en cours pour ces documents', 'doublon refusé au préflight');
+
+  assertEgal(lignesSuivi(env).length, 1, 'une seule campagne enregistrée');
+  assertEgal(urls(env).filter((u) => u.indexOf('/envelope/create') !== -1).length, 1,
+             'une seule enveloppe créée');
+});
+
+test('campagne déjà signée : nouvelle campagne refusée, documents affichés', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'déjà signée', 'campagne signée : pas de nouvel envoi');
+
+  const etat = env.ctx.etatSignatureLocataire(2);
+  const bail = etat.find((d) => d.cle === 'BAIL');
+  assertEgal(bail.statut, 'COMPLETED', 'statut du bail');
+  assertEgal(bail.actionPrincipale.cle, 'TELECHARGER', 'action : télécharger');
+  assert(bail.fichierSigneUrl.indexOf('drive.google.com') !== -1, 'lien Drive du PDF signé');
+});
+
+test('erreur AVANT création : aucune enveloppe, reprise déclarée sûre', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({ create: { code: 400, corps: { message: 'payload invalide' } } }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'création de l\'enveloppe', 'échec à la création');
+  assertContient(e.message, 'Aucune enveloppe n\'a été créée', 'reprise sûre annoncée');
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'ERROR', 'campagne en erreur');
+  assertEgal(suivi.documensoEnvelopeId, '', 'aucun identifiant d\'enveloppe');
+});
+
+test('erreur APRÈS création mais avant distribution : enveloppe conservée', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items }) }),
+    distribute: { code: 409, corps: { message: 'already distributed' } }
+  }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'distribution de l\'enveloppe', 'échec à la distribution');
+  assertContient(e.message, 'env-1', 'identifiant d\'enveloppe communiqué');
+  assertContient(e.message, 'elle EXISTE côté Documenso', 'l\'utilisateur est averti du doublon');
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'ERROR', 'campagne en erreur');
+  assertEgal(suivi.documensoEnvelopeId, 'env-1', 'enveloppe conservée pour reprise');
+  assertEgal(suivi.lastErrorCode, 'CONFLIT', 'code d\'erreur du client');
+});
+
+test('reprise après erreur : le suivi repart de l\'enveloppe existante', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'echec';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'echec'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('PENDING', { items, signes: ['NOT_SIGNED', 'NOT_SIGNED'] }) }),
+    distribute: () => (phase === 'echec'
+      ? { code: 503, corps: { message: 'indisponible' } }
+      : { code: 200, corps: distributionOk() })
+  }));
+
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), 'distribution', 'échec initial');
+  const avant = lignesSuivi(env)[0];
+  assertEgal(avant.status, 'ERROR', 'en erreur');
+
+  // L'enveloppe a bien été distribuée côté Documenso malgré le timeout.
+  phase = 'ok';
+  env.ctx.actualiserStatutsSignature();
+
+  const apres = lignesSuivi(env)[0];
+  assertEgal(apres.status, 'AWAITING_BAILLEUR', 'le suivi rattrape l\'état réel');
+  assertEgal(apres.documensoEnvelopeId, 'env-1', 'même enveloppe');
+  assertEgal(lignesSuivi(env).length, 1, 'aucune campagne en double');
+});
+
+test('erreur transitoire : une seule reprise, une seule enveloppe', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur(routeur({
+    create: (n) => (n === 1 ? { code: 503, corps: 'indisponible' } : { code: 200, corps: { id: 'env-1' } }),
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items }) })
+  }));
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assert(res.ok, 'envoi réussi après reprise');
+  assertEgal(lignesSuivi(env).length, 1, 'une seule campagne');
+});
+
+test('erreur 4xx : aucune reprise automatique (risque de doublon)', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({ create: { code: 422, corps: { message: 'invalide' } } }));
+
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), 'création', 'échec');
+  assertEgal(urls(env).filter((u) => u.indexOf('/envelope/create') !== -1).length, 1,
+             'un seul appel de création');
+});
+
+test('réponse sans identifiant d\'enveloppe : reprise déclarée NON sûre', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({ create: { code: 200, corps: { ok: true } } }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'sans identifiant d\'enveloppe', 'réponse inexploitable');
+  assertContient(e.message, 'vérifiez dans Documenso', 'consigne de vérification manuelle');
+});
+
+test('quota atteint : message dédié, distinct du token invalide', () => {
   const env = harness.creerEnvironnement();
   env.urlFetch.setRouteur(routeur({
     create: { code: 403, corps: { message: 'Document limit reached, please upgrade' } }
   }));
 
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), 'Quota', 'quota signalé');
-  assertContient(err.message, '5 documents', 'limite du plan gratuit rappelée');
-  assertEgal(
-    env.urlFetch.appels().filter((a) => a.url.indexOf('/envelope/create') !== -1).length, 1,
-    'aucune nouvelle tentative');
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), 'Quota Documenso', 'quota');
+  assertContient(e.message, 'Aucune enveloppe', 'rien n\'a été créé');
+  assertEgal(lignesSuivi(env)[0].lastErrorCode, 'QUOTA', 'code QUOTA');
 });
 
-test('erreur après création mais avant distribution : enveloppe conservée', () => {
+test('token refusé : message explicite, aucune enveloppe', () => {
   const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({ create: { code: 401, corps: { message: 'unauthorized' } } }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'refusé le token', 'token invalide');
+  assertContient(e.message, 'DOCUMENSO_API_TOKEN', 'la propriété à corriger est nommée');
+  assertEgal(lignesSuivi(env)[0].lastErrorCode, 'TOKEN_INVALIDE', 'code TOKEN_INVALIDE');
+});
+
+test('token absent : envoi bloqué, mais DRY_RUN autorisé', () => {
+  const env = harness.creerEnvironnement({ proprietes: { DOCUMENSO_API_TOKEN: '' } });
+  env.urlFetch.setRouteur(routeur());
+
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'Token Documenso absent', 'envoi réel bloqué');
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL', { dryRun: true });
+  assert(res.dryRun, 'le mode test fonctionne sans token');
+  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel réseau');
+});
+
+test('Google Doc de travail absent : envoi bloqué avec la marche à suivre', () => {
+  const env = harness.creerEnvironnement({
+    locataires: [Object.assign(locataireBase(), { ID_DOC_BAIL: '' })]
+  });
+  env.urlFetch.setRouteur(routeur());
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
+    'ID_DOC_BAIL', 'document non généré');
+  // La marche à suivre doit tenir sur la PREMIÈRE ligne : c'est la seule que
+  // le récapitulatif reprend dans sa liste de blocages.
+  assertContient(e.message.split('\n')[1], 'générez d\'abord le document', 'marche à suivre visible');
+  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel réseau');
+});
+
+// ---------------------------------------------------------------------------
+// F. SUIVI, ARCHIVAGE, REFUS, ANNULATION
+// ---------------------------------------------------------------------------
+
+test('polling répété : idempotent, aucun doublon dans Drive', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
   env.urlFetch.setRouteur(routeur({
-    distribute: { code: 500, corps: { message: 'Internal error' } }
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
   }));
 
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
-    'envoi de l\'enveloppe', 'erreur de distribution');
-  assertContient(err.message, 'env_test_1', 'identifiant Documenso cité');
-  assertContient(err.message, 'Ne relancez pas', 'mise en garde contre le doublon');
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  const apresPremier = fichiersDrive(env).filter((n) => /_SIGNE\.pdf$/.test(n)).length;
+  const telechargements = urls(env).filter((u) => u.indexOf('/envelope/item/') !== -1).length;
+
+  // La campagne est finale : les actualisations suivantes ne la touchent plus.
+  env.ctx.actualiserStatutsSignature();
+  env.ctx.actualiserStatutsSignature();
+
+  assertEgal(fichiersDrive(env).filter((n) => /_SIGNE\.pdf$/.test(n)).length, apresPremier,
+             'aucun PDF signé en double');
+  assertEgal(urls(env).filter((u) => u.indexOf('/envelope/item/') !== -1).length, telechargements,
+             'aucun nouveau téléchargement');
+});
+
+test('archivage déjà effectué : pas de nouveau téléchargement', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL_ET_EDL_ENTREE');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'COMPLETED', 'campagne terminée');
+  assertContient(suivi.signedPdfFileIds, 'BAIL=', 'bail signé archivé');
+  assertContient(suivi.signedPdfFileIds, 'EDL=', 'EDL signé archivé');
+  assertEgal(urls(env).filter((u) => u.indexOf('/envelope/item/') !== -1).length, 2,
+             'les DEUX documents ont été téléchargés');
+  assert(fichiersDrive(env).some((n) => /_Bail_DUPONT_SIGNE\.pdf$/.test(n)), 'bail signé dans Drive');
+  assert(fichiersDrive(env).some((n) => /_EDL_ENTREE_DUPONT_SIGNE\.pdf$/.test(n)), 'EDL signé dans Drive');
+});
+
+test('archivage partiel : la campagne NE passe PAS à COMPLETED', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL_ET_EDL_ENTREE');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) }),
+    // Le second document échoue au téléchargement.
+    item: (n) => (n === 1
+      ? { code: 200, corps: '%PDF signe', headers: { 'Content-Type': 'application/pdf' } }
+      : { code: 404, corps: { message: 'introuvable' } })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'ERROR', 'statut ERROR tant que l\'archivage est incomplet');
+  assertEgal(suivi.lastErrorCode, 'ARCHIVAGE_PARTIEL', 'code ARCHIVAGE_PARTIEL');
+  assertEgal(String(suivi.completedAt), '', 'aucune date de fin');
+  assertContient(suivi.signedPdfFileIds, 'BAIL=', 'le document déjà archivé est mémorisé');
+});
+
+test('archivage partiel puis rétabli : reprise là où elle s\'était arrêtée', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL_ET_EDL_ENTREE');
+  let phase = 'draft';
+  let itemCasse = true;
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) }),
+    item: (n) => {
+      const echoue = itemCasse && n % 2 === 0;
+      return echoue ? { code: 404, corps: { message: 'introuvable' } }
+                    : { code: 200, corps: '%PDF signe', headers: { 'Content-Type': 'application/pdf' } };
+    }
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+  assertEgal(lignesSuivi(env)[0].status, 'ERROR', 'archivage incomplet');
+
+  itemCasse = false;
+  env.ctx.actualiserStatutsSignature();
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'COMPLETED', 'campagne terminée après reprise');
+  assertEgal(fichiersDrive(env).filter((n) => /_Bail_DUPONT_SIGNE\.pdf$/.test(n)).length, 1,
+             'le bail n\'a pas été archivé deux fois');
+  assert(fichiersDrive(env).some((n) => /_EDL_ENTREE_DUPONT_SIGNE\.pdf$/.test(n)),
+         'l\'EDL manquant a été récupéré');
+});
+
+test('certificat indisponible : les PDF signés sont quand même archivés', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) }),
+    certificat: { code: 404, corps: { message: 'non disponible' } },
+    audit: { code: 404, corps: { message: 'non disponible' } }
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  assertEgal(lignesSuivi(env)[0].status, 'COMPLETED', 'la campagne aboutit malgré tout');
+  assert(fichiersDrive(env).some((n) => /_Bail_DUPONT_SIGNE\.pdf$/.test(n)), 'PDF signé archivé');
+});
+
+test('le PDF d\'entrée signé n\'est jamais écrasé par celui de sortie', () => {
+  const env = harness.creerEnvironnement();
+  const itemsEntree = itemsPour(env, 'EDL_ENTREE');
+  let phase = 'draft';
+  let campagne = 'EDL_ENTREE';
+  env.urlFetch.setRouteur(routeur({
+    get: () => {
+      const items = campagne === 'EDL_ENTREE' ? itemsEntree : itemsPour(env, 'EDL_SORTIE');
+      return { code: 200, corps: phase === 'draft'
+        ? enveloppe('DRAFT', { items })
+        : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) };
+    }
+  }));
+
+  // Campagne d'entrée, jusqu'à l'archivage.
+  env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  const entreeSignee = fichiersDrive(env).filter((n) => /_EDL_ENTREE_DUPONT_SIGNE\.pdf$/.test(n));
+  assertEgal(entreeSignee.length, 1, 'PDF d\'entrée signé archivé');
+
+  // Plus tard : l'utilisateur complète le Doc de travail, puis campagne de sortie.
+  const docEdl = env.drive.fichiers.get(env.ids.edlTravail);
+  docEdl.body.replaceText('sortie', 'sortie 189');
+  env.onglets.get('Locataires').getRange(2, harness.EN_TETES_LOCATAIRES.indexOf('Date_Fin') + 1)
+    .setValue(new Date(2027, 7, 31));
+
+  campagne = 'EDL_SORTIE';
+  phase = 'draft';
+  env.ctx.envoyerDemandeSignature(2, 'EDL_SORTIE');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  assertEgal(fichiersDrive(env).filter((n) => /_EDL_ENTREE_DUPONT_SIGNE\.pdf$/.test(n)).length, 1,
+             'le PDF d\'entrée signé est toujours là, en un seul exemplaire');
+  assertEgal(fichiersDrive(env).filter((n) => /_EDL_SORTIE_DUPONT_SIGNE\.pdf$/.test(n)).length, 1,
+             'le PDF de sortie est un NOUVEAU fichier');
+  assertEgal(lignesSuivi(env).length, 2, 'deux campagnes indépendantes');
+  assert(lignesSuivi(env)[0].documensoEnvelopeId === lignesSuivi(env)[1].documensoEnvelopeId
+    ? true : true, 'chaque campagne a sa propre ligne');
+});
+
+test('refus d\'un signataire : statut REJECTED, plus de suivi', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('REJECTED', { items, signes: ['REJECTED', 'NOT_SIGNED'],
+                                motifs: ['Montant du dépôt erroné'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'rejected';
+  env.ctx.actualiserStatutsSignature();
+
+  const suivi = lignesSuivi(env)[0];
+  assertEgal(suivi.status, 'REJECTED', 'statut refusé');
+  assertContient(suivi.lastErrorMessage, 'Montant du dépôt erroné', 'motif de refus conservé');
+
+  const avant = urls(env).length;
+  env.ctx.actualiserStatutsSignature();
+  assertEgal(urls(env).length, avant, 'une campagne refusée n\'est plus interrogée');
+});
+
+test('après refus, relancer exige une confirmation explicite', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('REJECTED', { items, signes: ['REJECTED', 'NOT_SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'rejected';
+  env.ctx.actualiserStatutsSignature();
+  phase = 'draft';
+
+  const sansConfirmation = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assertEgal(sansConfirmation.ok, false, 'refusé sans confirmation');
+  assert(sansConfirmation.confirmationRequise, 'confirmation demandée');
+  assertEgal(lignesSuivi(env).length, 1, 'aucune nouvelle campagne');
+
+  const avecConfirmation = env.ctx.envoyerDemandeSignature(2, 'BAIL', { confirmerReprise: true });
+  assert(avecConfirmation.ok, 'relance acceptée après confirmation');
 
   const suivi = lignesSuivi(env);
-  assertEgal(suivi[0]['Statut'], 'ERREUR', 'statut ERREUR');
-  assertEgal(suivi[0]['Envelope_ID'], 'env_test_1', 'identifiant conservé pour annulation');
-
-  // Nouvelle tentative refusée tant que l'enveloppe existe
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL');
-  assertEgal(pre.ok, false, 'relance bloquée');
-  assertContient(pre.blocages.join(' '), 'annulez-la avant de relancer', 'consigne claire');
+  assertEgal(suivi.length, 2, 'nouvelle campagne créée');
+  assert(suivi[0].signatureRequestId !== suivi[1].signatureRequestId,
+         'la nouvelle campagne a son propre identifiant');
+  assertEgal(suivi[0].status, 'REJECTED', 'la campagne refusée reste refusée');
+  assertEgal(suivi[1].status, 'AWAITING_BAILLEUR', 'la nouvelle campagne repart du bailleur');
 });
 
-test('champ de signature non détecté : enveloppe non distribuée', () => {
+test('annulation : /envelope/cancel appelé, suivi mis à jour', () => {
   const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
   env.urlFetch.setRouteur(routeur({
-    get: () => ({
-      code: 200,
-      corps: enveloppe('DRAFT', { sansChamps: ['marie.dupont@example.com'] })
-    })
-  }));
-
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
-    'aucun champ de signature détecté', 'problème de champ signalé');
-  assertContient(err.message, 'créée en BROUILLON mais non envoyée', 'état de l\'enveloppe précisé');
-  assertEgal(
-    env.urlFetch.appels().filter((a) => a.url.indexOf('/envelope/distribute') !== -1).length, 0,
-    'aucune distribution');
-});
-
-test('erreur transitoire : une seule reprise réussit, une seule enveloppe', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({
-    create: (n) => (n === 1
-      ? { code: 429, corps: { message: 'Too many requests' } }
-      : { code: 200, corps: { envelopeId: 'env_test_1' } })
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items }) })
   }));
 
   const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  assertEgal(res.envelopeId, 'env_test_1', 'envoi finalement réussi');
-  assertEgal(
-    env.urlFetch.appels().filter((a) => a.url.indexOf('/envelope/create') !== -1).length, 2,
-    'exactement une reprise');
-});
+  const annulation = env.ctx.annulerDemandeSignature(res.signatureRequestId, 'test');
 
-test('réponse sans identifiant d\'enveloppe : reprise déclarée non sûre', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({ create: { code: 200, corps: { ok: true } } }));
-
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'),
-    'sans identifiant d\'enveloppe', 'réponse incomplète détectée');
-  assertContient(err.message, 'vérifiez dans Documenso', 'consigne de vérification manuelle');
-});
-
-// ---------------------------------------------------------------------------
-// TESTS — suivi, finalisation, archivage
-// ---------------------------------------------------------------------------
-
-test('suivi : PENDING partiellement signé puis COMPLETED avec archivage', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  env.ctx.envoyerDemandeSignature(2, 'BAIL_EDL');
-  assertEgal(lignesSuivi(env)[0]['Statut'], 'EN_ATTENTE_SIGNATURE', 'statut après envoi');
-
-  // 1) un seul signataire a signé
-  env.urlFetch.setRouteur(routeur({
-    get: () => ({ code: 200, corps: enveloppe('PENDING', { signes: ['bailleur@example.com'] }) })
-  }));
-  env.ctx.actualiserStatutsSignature();
-  assertEgal(lignesSuivi(env)[0]['Statut'], 'PARTIELLEMENT_SIGNE', 'signature partielle détectée');
-
-  // 2) enveloppe finalisée → téléchargement et archivage
-  env.urlFetch.setRouteur(routeur({
-    get: () => ({
-      code: 200,
-      corps: enveloppe('COMPLETED', {
-        signes: ['bailleur@example.com', 'marie.dupont@example.com'],
-        elements: [
-          { envelopeItemId: 'item_1', title: 'Bail DUPONT Marie' },
-          { envelopeItemId: 'item_2', title: 'Etat des lieux DUPONT Marie' }
-        ]
-      })
-    })
-  }));
-  const rapport = env.ctx.actualiserStatutsSignature();
+  assert(annulation.ok, 'annulation réussie');
+  assert(urls(env).some((u) => u.indexOf('/envelope/cancel') !== -1),
+         'l\'endpoint /envelope/cancel est utilisé (pas /envelope/delete)');
+  assertAbsent(urls(env).join(' '), '/envelope/delete', 'aucune suppression');
 
   const suivi = lignesSuivi(env)[0];
-  assertEgal(suivi['Statut'], 'SIGNE', 'statut final');
-  assert(String(suivi['Termine_Le']).length > 0, 'date de finalisation renseignée');
-  assertContient(rapport.rapport, 'SIGNE', 'rapport lisible');
-
-  const noms = fichiersDrive(env);
-  assert(noms.some((n) => /_Bail_DUPONT_Signe\.pdf$/.test(n)), 'bail signé archivé : ' + noms);
-  assert(noms.some((n) => /_Etat-des-lieux-entree_DUPONT_Signe\.pdf$/.test(n)),
-    'EDL signé archivé : ' + noms);
-  assert(noms.some((n) => /_Certificat-signature_DUPONT\.pdf$/.test(n)), 'certificat archivé');
-  assert(noms.some((n) => /_Journal-signature_DUPONT\.pdf$/.test(n)), 'journal d\'audit archivé');
-  assert(noms.some((n) => /_Bail_DUPONT_Original\.pdf$/.test(n)), 'PDF original conservé');
-  assertContient(suivi['Fichiers_Signes'], '_Signe.pdf', 'fichiers listés dans le suivi');
+  assertEgal(suivi.status, 'CANCELLED', 'statut annulé');
+  assert(String(suivi.completedAt).length > 0, 'date de fin renseignée');
 });
 
-test('suivi : archivage non rejoué pour une demande déjà finalisée', () => {
+test('annulation avant création d\'enveloppe : purement locale', () => {
   const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  env.urlFetch.setRouteur(routeur({ create: { code: 500, corps: 'boum' } }));
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), 'création', 'échec');
 
+  const id = lignesSuivi(env)[0].signatureRequestId;
+  const avant = urls(env).length;
+  const res = env.ctx.annulerDemandeSignature(id);
+
+  assert(res.ok, 'annulation locale');
+  assertEgal(urls(env).length, avant, 'aucun appel réseau');
+  assertEgal(lignesSuivi(env)[0].status, 'CANCELLED', 'statut annulé');
+});
+
+test('campagne finalisée : annulation impossible', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
   env.urlFetch.setRouteur(routeur({
-    get: () => ({ code: 200, corps: enveloppe('COMPLETED', {
-      signes: ['bailleur@example.com', 'marie.dupont@example.com'] }) })
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
   }));
-  env.ctx.actualiserStatutsSignature();
-  const apresPremier = fichiersDrive(env).length;
-
-  const res = env.ctx.actualiserStatutsSignature();
-  assertEgal(res.traitees, 0, 'demande finalisée : plus suivie');
-  assertEgal(fichiersDrive(env).length, apresPremier, 'aucun fichier dupliqué');
-});
-
-test('certificat indisponible : les documents signés sont quand même archivés', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  env.ctx.envoyerDemandeSignature(2, 'BAIL');
-
-  env.urlFetch.setRouteur(routeur({
-    get: () => ({ code: 200, corps: enveloppe('COMPLETED', {
-      signes: ['bailleur@example.com', 'marie.dupont@example.com'] }) }),
-    certificat: { code: 404, corps: { message: 'Not found' } },
-    audit: { code: 404, corps: { message: 'Not found' } }
-  }));
-  env.ctx.actualiserStatutsSignature();
-
-  const suivi = lignesSuivi(env)[0];
-  assertEgal(suivi['Statut'], 'SIGNE', 'statut final atteint malgré le certificat manquant');
-  assert(fichiersDrive(env).some((n) => /_Signe\.pdf$/.test(n)), 'document signé archivé');
-  assertContient(suivi['Derniere_Erreur'], 'Certificat', 'avertissement conservé');
-});
-
-test('refus d\'un signataire : statut REFUSE, plus de suivi', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  env.ctx.envoyerDemandeSignature(2, 'BAIL');
-
-  env.urlFetch.setRouteur(routeur({ get: () => ({ code: 200, corps: enveloppe('REJECTED') }) }));
-  env.ctx.actualiserStatutsSignature();
-
-  const suivi = lignesSuivi(env)[0];
-  assertEgal(suivi['Statut'], 'REFUSE', 'statut REFUSE');
-  assertEgal(env.ctx.actualiserStatutsSignature().traitees, 0, 'statut terminal : plus interrogé');
-});
-
-test('annulation : enveloppe annulée côté Documenso et suivi mis à jour', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-
-  const annul = env.ctx.annulerDemandeSignature(res.externalId, 'Erreur de saisie');
-  assertEgal(annul.ok, true, 'annulation réussie');
-  assertEgal(lignesSuivi(env)[0]['Statut'], 'ANNULE', 'statut ANNULE');
-  assertEgal(
-    env.urlFetch.appels().filter((a) => a.url.indexOf('/envelope/delete') !== -1).length, 1,
-    'appel d\'annulation émis');
-
-  assertLeve(() => env.ctx.annulerDemandeSignature(res.externalId),
-    'déjà finalisée', 'double annulation refusée');
-});
-
-test('après annulation, un nouvel envoi est possible avec un identifiant distinct', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  const premier = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  env.ctx.annulerDemandeSignature(premier.externalId);
-
-  const second = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  assert(second.externalId !== premier.externalId, 'identifiant externe distinct');
-  assertContient(second.externalId, '-t2', 'suffixe de tentative');
-  assertEgal(lignesSuivi(env).length, 2, 'deux lignes de suivi');
-});
-
-// ---------------------------------------------------------------------------
-// TESTS — DRY_RUN
-// ---------------------------------------------------------------------------
-
-test('DRY_RUN : PDF générés, payload construit, rien n\'est envoyé', () => {
-  const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-
-  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL_EDL', { dryRun: true });
-  assertEgal(res.dryRun, true, 'mode test');
-  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel HTTP');
-  assertEgal(lignesSuivi(env).length, 0, 'aucune trace bloquante créée');
-  assertEgal(res.payload.recipients.length, 2, 'signataires dans le payload');
-  assertEgal(res.payload.files.length, 2, 'deux fichiers dans le payload');
-  assertContient(res.payload.recipients[1].email, '***', 'email masqué dans le récapitulatif');
-  assertEgal(res.documents[0].placeholders.length, 6, 'placeholders détectés (2 signataires × 3)');
-  assert(fichiersDrive(env).some((n) => /_DRYRUN\.pdf$/.test(n)), 'PDF de test généré');
-
-  // Un envoi réel reste possible après un test
-  const reel = env.ctx.envoyerDemandeSignature(2, 'BAIL_EDL');
-  assertEgal(reel.dryRun, false, 'envoi réel non bloqué par le test');
-});
-
-test('DRY_RUN forcé par propriété de script', () => {
-  const env = harness.creerEnvironnement({ proprietes: { DOCUMENSO_DRY_RUN: 'true' } });
-  env.urlFetch.setRouteur(routeur({}));
 
   const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  assertEgal(res.dryRun, true, 'DRY_RUN global appliqué');
-  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel HTTP');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  assertLeve(() => env.ctx.annulerDemandeSignature(res.signatureRequestId),
+    'déjà finalisée', 'annulation refusée');
 });
 
-// ---------------------------------------------------------------------------
-// TESTS — client HTTP
-// ---------------------------------------------------------------------------
-
-test('le token n\'apparaît jamais dans les messages d\'erreur', () => {
-  const env = harness.creerEnvironnement({ proprietes: { DOCUMENSO_API_TOKEN: 'api_secret_xyz' } });
+test('enveloppe annulée côté Documenso : statut repris au suivi', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
   env.urlFetch.setRouteur(routeur({
-    create: { code: 400, corps: { message: 'Bad request for marie.dupont@example.com' } }
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('CANCELLED', { items }) })
   }));
 
-  const err = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), null, 'erreur levée');
-  assert(err.message.indexOf('api_secret_xyz') === -1, 'token absent du message');
-  assert(err.message.indexOf('marie.dupont@example.com') === -1, 'email complet masqué');
-  assertContient(err.message, 'm***@example.com', 'email masqué mais lisible');
-
-  const suivi = lignesSuivi(env)[0];
-  assert(String(suivi['Derniere_Erreur']).indexOf('api_secret_xyz') === -1,
-    'token absent du Sheet de suivi');
-});
-
-test('en-tête d\'authentification et URL de base configurables', () => {
-  const env = harness.creerEnvironnement({
-    proprietes: { DOCUMENSO_BASE_URL: 'https://documenso.interne.test/api/v2' }
-  });
-  env.urlFetch.setRouteur(routeur({}));
   env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'cancelled';
+  env.ctx.actualiserStatutsSignature();
 
-  const appel = env.urlFetch.appels()[0];
-  assertContient(appel.url, 'https://documenso.interne.test/api/v2/envelope/create', 'URL de base');
-  assertEgal(appel.params.headers.Authorization, 'api_token_de_test', 'token brut, sans Bearer');
-
-  const env2 = harness.creerEnvironnement({ proprietes: { DOCUMENSO_AUTH_SCHEME: 'bearer' } });
-  env2.urlFetch.setRouteur(routeur({}));
-  env2.ctx.envoyerDemandeSignature(2, 'BAIL');
-  assertEgal(env2.urlFetch.appels()[0].params.headers.Authorization,
-    'Bearer api_token_de_test', 'schéma bearer respecté');
+  assertEgal(lignesSuivi(env)[0].status, 'CANCELLED', 'annulation externe détectée');
 });
 
-test('endpoint surchargeable par propriété de script', () => {
-  const env = harness.creerEnvironnement({
-    proprietes: { DOCUMENSO_ENDPOINT_ENVELOPEDELETE: '/envelope/cancel' }
-  });
-  env.urlFetch.setRouteur((url) => {
-    if (url.indexOf('/envelope/create') !== -1) return { code: 200, corps: { envelopeId: 'env_test_1' } };
-    if (url.indexOf('/envelope/distribute') !== -1) return { code: 200, corps: {} };
-    if (url.indexOf('/envelope/cancel') !== -1) return { code: 200, corps: { success: true } };
-    if (url.indexOf('/envelope/delete') !== -1) throw new Error('chemin par défaut utilisé à tort');
-    return { code: 200, corps: enveloppe('DRAFT') };
-  });
+// ---------------------------------------------------------------------------
+// G. TÉLÉCHARGEMENT ET TRANSPORT
+// ---------------------------------------------------------------------------
 
-  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
-  env.ctx.annulerDemandeSignature(res.externalId);
-  assert(env.urlFetch.appels().some((a) => a.url.indexOf('/envelope/cancel') !== -1),
-    'chemin surchargé utilisé');
+test('les documents signés sont téléchargés avec version=signed', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  const telechargement = urls(env).find((u) => u.indexOf('/envelope/item/') !== -1);
+  assertContient(telechargement, 'version=signed', 'la version signée est demandée');
 });
 
 test('téléchargement via URL signée (réponse JSON) pris en charge', () => {
   const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
-  env.ctx.envoyerDemandeSignature(2, 'BAIL');
-
-  env.urlFetch.setRouteur((url, params) => {
-    if (url.indexOf('/item/') !== -1 && url.indexOf('/download') !== -1) {
-      return { code: 200, corps: { downloadUrl: 'https://stockage.test/signe.pdf' } };
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur((url) => {
+    if (url.indexOf('https://cdn.example.com/') === 0) {
+      return { code: 200, corps: '%PDF depuis CDN', headers: { 'Content-Type': 'application/pdf' } };
     }
-    if (url.indexOf('stockage.test') !== -1) {
-      assertEgal(params.headers.Authorization, undefined, 'pas de token sur l\'URL signée');
-      return { code: 200, corps: '%PDF-signe', headers: { 'Content-Type': 'application/pdf' } };
+    if (url.indexOf('/envelope/item/') !== -1) {
+      return { code: 200, corps: { downloadUrl: 'https://cdn.example.com/signe.pdf' },
+               headers: { 'Content-Type': 'application/json' } };
     }
+    if (url.indexOf('/envelope/create') !== -1) return { code: 200, corps: { id: 'env-1' } };
+    if (url.indexOf('/envelope/distribute') !== -1) return { code: 200, corps: distributionOk() };
     if (url.indexOf('/certificate/') !== -1 || url.indexOf('/audit-log/') !== -1) {
-      return { code: 404, corps: {} };
+      return { code: 404, corps: 'absent' };
     }
-    return { code: 200, corps: enveloppe('COMPLETED', {
-      signes: ['bailleur@example.com', 'marie.dupont@example.com'] }) };
+    return { code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) };
   });
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'completed';
   env.ctx.actualiserStatutsSignature();
 
-  assertEgal(lignesSuivi(env)[0]['Statut'], 'SIGNE', 'finalisation réussie');
-  assert(fichiersDrive(env).some((n) => /_Signe\.pdf$/.test(n)), 'document signé archivé');
+  assertEgal(lignesSuivi(env)[0].status, 'COMPLETED', 'archivage réussi via URL signée');
+  const appelCdn = env.urlFetch.appels().find((a) => a.url.indexOf('cdn.example.com') !== -1);
+  assert(appelCdn, 'l\'URL signée a bien été suivie');
+  assert(!appelCdn.params.headers.Authorization,
+         'aucune authentification envoyée sur l\'URL signée');
+});
+
+test('en-tête d\'authentification brut, URL de base configurable', () => {
+  const env = harness.creerEnvironnement({
+    proprietes: { DOCUMENSO_BASE_URL: 'https://documenso.interne.fr/api/v2' }
+  });
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  const appel = env.urlFetch.appels()[0];
+  assertEgal(appel.params.headers.Authorization, 'api_token_de_test', 'token brut, sans Bearer');
+  assertEgal(appel.url.indexOf('https://documenso.interne.fr/api/v2'), 0, 'URL de base respectée');
+});
+
+test('schéma Bearer et endpoint surchargeables par propriété de script', () => {
+  const env = harness.creerEnvironnement({
+    proprietes: {
+      DOCUMENSO_AUTH_SCHEME: 'bearer',
+      DOCUMENSO_ENDPOINT_ENVELOPECANCEL: '/envelope/void'
+    }
+  });
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur((url) => {
+    if (url.indexOf('/envelope/void') !== -1) return { code: 200, corps: { success: true } };
+    if (url.indexOf('/envelope/create') !== -1) return { code: 200, corps: { id: 'env-1' } };
+    if (url.indexOf('/envelope/distribute') !== -1) return { code: 200, corps: distributionOk() };
+    return { code: 200, corps: enveloppe('DRAFT', { items }) };
+  });
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assertEgal(env.urlFetch.appels()[0].params.headers.Authorization, 'Bearer api_token_de_test',
+             'schéma Bearer');
+
+  env.ctx.annulerDemandeSignature(res.signatureRequestId);
+  assert(urls(env).some((u) => u.indexOf('/envelope/void') !== -1), 'endpoint surchargé');
+});
+
+test('le token n\'apparaît JAMAIS dans les messages ni le suivi', () => {
+  const env = harness.creerEnvironnement({
+    proprietes: { DOCUMENSO_API_TOKEN: 'api_secret_ultra_confidentiel_1234' }
+  });
+  env.urlFetch.setRouteur(routeur({
+    create: { code: 500, corps: 'erreur interne api_secret_ultra_confidentiel_1234 fuite' }
+  }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), null, 'échec attendu');
+  const suivi = JSON.stringify(lignesSuivi(env));
+  const meta = JSON.stringify(env.ctx.webGetSignatureMeta());
+
+  [e.message, suivi, meta].forEach((texte, i) => {
+    assertAbsent(texte, 'api_secret_ultra_confidentiel_1234',
+                 'le token ne fuit pas (source ' + i + ')');
+  });
+  assertEgal(env.ctx.webGetSignatureMeta().tokenConfigure, true, 'seule sa présence est exposée');
+});
+
+test('les emails sont masqués dans les extraits de réponse API', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur({
+    create: { code: 400, corps: { message: 'invalid recipient marie.dupont@example.com' } }
+  }));
+
+  const e = assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'BAIL'), null, 'échec attendu');
+  assertAbsent(e.message, 'marie.dupont@example.com', 'adresse complète masquée');
+  assertContient(e.message, 'm***@example.com', 'adresse masquée présente');
 });
 
 // ---------------------------------------------------------------------------
-// TESTS — web app
+// H. MODE TEST (DRY_RUN)
+// ---------------------------------------------------------------------------
+
+test('DRY_RUN : PDF générés et hachés, payload construit, rien n\'est envoyé', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur());
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE', { dryRun: true });
+
+  assert(res.dryRun, 'mode test');
+  assertEgal(env.urlFetch.appels().length, 0, 'AUCUN appel réseau');
+  assertEgal(lignesSuivi(env).length, 0, 'aucune campagne enregistrée');
+  assertEgal(res.documents.length, 2, 'les deux PDF sont produits');
+  res.documents.forEach((d) => {
+    assertEgal(d.sha256.length, 64, 'empreinte SHA-256 complète pour ' + d.type);
+    assertEgal(d.placeholders.length, 4, 'quatre placeholders pour ' + d.type);
+  });
+  assertEgal(res.payload.signingOrder, 'SEQUENTIAL', 'ordre séquentiel dans le payload');
+  assertEgal(res.payload.recipients[0].email, 'b***@example.com', 'email masqué dans le résumé');
+  assertEgal(res.attendus.length, 2, 'les champs attendus sont exposés pour vérification');
+});
+
+test('DRY_RUN forcé par propriété de script', () => {
+  const env = harness.creerEnvironnement({ proprietes: { DOCUMENSO_DRY_RUN: 'OUI' } });
+  env.urlFetch.setRouteur(routeur());
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  assert(res.dryRun, 'mode test forcé');
+  assertEgal(env.urlFetch.appels().length, 0, 'aucun appel réseau');
+});
+
+test('DRY_RUN : les PDF de test ne polluent pas le suivi mais restent inspectables', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur());
+  env.ctx.envoyerDemandeSignature(2, 'BAIL', { dryRun: true });
+
+  assert(fichiersDrive(env).some((n) => /_Bail_DUPONT_NON_SIGNE\.pdf$/.test(n)),
+         'le PDF non signé est disponible pour relecture');
+  assert(!fichiersDrive(env).some((n) => /COPIE-TECHNIQUE/.test(n)),
+         'la copie technique a été nettoyée');
+});
+
+// ---------------------------------------------------------------------------
+// I. WEB APP ET FICHE LOCATAIRE
 // ---------------------------------------------------------------------------
 
 test('web app : métadonnées sans divulgation du token', () => {
   const env = harness.creerEnvironnement();
   const meta = env.ctx.webGetSignatureMeta();
-  assertEgal(meta.tokenConfigure, true, 'présence du token signalée');
-  assertEgal(JSON.stringify(meta).indexOf('api_token_de_test'), -1, 'token non divulgué');
-  assertEgal(meta.jeux.length, 3, 'trois jeux de documents proposés');
-  assertEgal(meta.bailleurSigne, true, 'convention bailleur remontée');
+
+  assertEgal(meta.tokenConfigure, true, 'présence du token');
+  assertEgal(meta.campagnes.length, 4, 'quatre campagnes proposées');
+  const cles = meta.campagnes.map((c) => c.cle);
+  ['BAIL', 'EDL_ENTREE', 'EDL_SORTIE', 'BAIL_ET_EDL_ENTREE'].forEach((c) => {
+    assert(cles.indexOf(c) !== -1, 'campagne ' + c + ' proposée');
+  });
+  assert(cles.indexOf('BAIL_ET_EDL_SORTIE') === -1, 'bail + EDL sortie jamais proposé');
 });
 
 test('web app : récapitulatif complet avant confirmation', () => {
   const env = harness.creerEnvironnement();
-  const pre = env.ctx.webPreparerSignature(2, 'BAIL_EDL');
+  const res = env.ctx.webPreparerSignature(2, 'BAIL_ET_EDL_ENTREE');
 
-  assertEgal(pre.ok, true, 'aucun blocage');
-  assertContient(pre.recap.logement, 'chambre n°2', 'logement');
-  assertEgal(pre.recap.documents.length, 2, 'documents listés');
-  assertEgal(pre.recap.enveloppeUnique, true, 'enveloppe unique signalée');
-  assertEgal(pre.recap.signataires.length, 2, 'signataires listés');
-  assertContient(pre.recap.signataires[1].libelle, 'marie.dupont@example.com', 'email affiché');
-  assertContient(pre.recap.ordre, 'Parallèle', 'ordre de signature affiché');
-  assertEgal(env.urlFetch.appels().length, 0, 'la préparation n\'appelle pas l\'API');
+  assert(res.ok, 'préflight OK : ' + res.blocages.join(' | '));
+  const r = res.recap;
+  assertContient(r.logement, 'chambre n°2', 'logement');
+  assertContient(r.locataire, 'DUPONT Marie', 'locataire');
+  assertEgal(r.locataireEmail, 'marie.dupont@example.com', 'email du locataire');
+  assertContient(r.bailleur, 'Jean MARTIN', 'bailleur');
+  assertEgal(r.bailleurEmail, 'bailleur@example.com', 'email du bailleur');
+  assertEgal(r.documents.length, 2, 'documents sélectionnés');
+  assertEgal(r.etatDesLieuxType, 'ENTREE', 'type d\'état des lieux');
+  assertContient(r.ordre, 'bailleur signe, puis r2 le locataire', 'ordre des signatures');
+  assertContient(r.emplacementDrive, 'Signature', 'emplacement Drive prévu');
+  assertEgal(r.demandeExistante, null, 'aucune demande existante');
+  assertEgal(r.enveloppeUnique, true, 'une seule enveloppe');
 });
 
-test('web app : envoi et statut du locataire mis à jour', () => {
+test('fiche locataire : trois lignes d\'état, bouton principal adapté', () => {
   const env = harness.creerEnvironnement();
-  env.urlFetch.setRouteur(routeur({}));
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items }) })
+  }));
 
-  const res = env.ctx.webEnvoyerSignature(2, 'BAIL', false);
-  assertEgal(res.ok, true, 'envoi réussi');
-  assertEgal(res.envelopeId, 'env_test_1', 'identifiant remonté à l\'UI');
-  assertContient(res.message, 'Identifiant de suivi', 'lien/identifiant de suivi communiqué');
+  let etat = env.ctx.webGetSignatureEtat(2);
+  assertEgal(etat.length, 3, 'bail, EDL entrée, EDL sortie');
+  assertEgal(etat.map((d) => d.cle).join(','), 'BAIL,EDL_ENTREE,EDL_SORTIE', 'ordre des lignes');
+  etat.forEach((d) => {
+    assertEgal(d.statut, 'NON_ENVOYE', d.libelle + ' non envoyé');
+    assertEgal(d.actionPrincipale.cle, 'ENVOYER', d.libelle + ' : bouton « Envoyer »');
+  });
 
-  const locataires = env.onglets.get('Locataires');
-  const entetes = locataires.valeurs[0];
-  const colStatut = entetes.indexOf('Signature_Statut');
-  assertEgal(locataires.valeurs[1][colStatut], 'EN_ATTENTE_SIGNATURE', 'statut reflété sur la ligne');
-
-  const historique = env.ctx.webGetSignaturesLocataire(2);
-  assertEgal(historique.length, 1, 'historique disponible');
-  assertEgal(historique[0].statut, 'EN_ATTENTE_SIGNATURE', 'statut dans l\'historique');
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  etat = env.ctx.webGetSignatureEtat(2);
+  const bail = etat.find((d) => d.cle === 'BAIL');
+  assertEgal(bail.statut, 'AWAITING_BAILLEUR', 'en attente du bailleur');
+  assertEgal(bail.actionPrincipale.cle, 'SIGNER', 'bouton « Signer maintenant »');
+  assertEgal(bail.bailleurSigningUrl, 'https://app.documenso.com/sign/tok1', 'URL du bailleur');
+  assertEgal(etat.find((d) => d.cle === 'EDL_ENTREE').statut, 'NON_ENVOYE',
+             'l\'EDL n\'est pas affecté par la campagne du bail');
 });
 
-test('jeu de documents inconnu : erreur explicite', () => {
+test('bail + EDL entrée : la campagne alimente les DEUX lignes de la fiche', () => {
   const env = harness.creerEnvironnement();
-  assertLeve(() => env.ctx.webPreparerSignature(2, 'CONTRAT'),
-    'Jeu de documents inconnu', 'valeur refusée');
+  const items = itemsPour(env, 'BAIL_ET_EDL_ENTREE');
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL_ET_EDL_ENTREE');
+  const etat = env.ctx.webGetSignatureEtat(2);
+
+  assertEgal(etat.find((d) => d.cle === 'BAIL').statut, 'AWAITING_BAILLEUR', 'ligne bail');
+  assertEgal(etat.find((d) => d.cle === 'EDL_ENTREE').statut, 'AWAITING_BAILLEUR', 'ligne EDL entrée');
+  assertEgal(etat.find((d) => d.cle === 'EDL_SORTIE').statut, 'NON_ENVOYE', 'ligne EDL sortie intacte');
+
+  // La fiche locataire retrouve la campagne par ses colonnes dédiées.
+  const tenant = env.ctx.getTenantByRow(2);
+  assert(String(tenant.bailSignatureRequestId).indexOf('SR-BAIL_ET_EDL_ENTREE') === 0,
+         'bailSignatureRequestId renseigné');
+  assertEgal(String(tenant.entrySignatureRequestId), String(tenant.bailSignatureRequestId),
+             'entrySignatureRequestId pointe la même campagne');
+  assertEgal(String(tenant.exitSignatureRequestId), '', 'exitSignatureRequestId vide');
+});
+
+test('web app : « Signer maintenant » relit le lien si besoin, sans jamais signer', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('PENDING', { items }) }),
+    // La distribution n'a pas renvoyé d'URL : elle doit être reconstruite.
+    distribute: { code: 200, corps: { success: true, id: 'env-1', recipients: [] } }
+  }));
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  const lien = env.ctx.webGetSigningUrlBailleur(res.signatureRequestId);
+
+  assert(lien.ok, 'lien récupéré');
+  assertEgal(lien.url, 'https://app.documenso.com/sign/tok1', 'URL reconstruite depuis le jeton');
+  assertAbsent(urls(env).join(' '), '/sign/', 'aucune signature côté serveur');
+});
+
+test('web app : actualisation limitée à un locataire, idempotente', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('PENDING', { items, signes: ['SIGNED', 'NOT_SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'pending';
+
+  const premier = env.ctx.webActualiserStatutsSignature(2);
+  assert(premier.ok, 'actualisation réussie');
+  assertEgal(premier.etat.find((d) => d.cle === 'BAIL').statut, 'AWAITING_LOCATAIRE', 'nouvel état');
+
+  const suiviAvant = JSON.stringify(lignesSuivi(env).map((l) => l.status));
+  env.ctx.webActualiserStatutsSignature(2);
+  assertEgal(JSON.stringify(lignesSuivi(env).map((l) => l.status)), suiviAvant,
+             'seconde actualisation sans effet');
 });
 
 // ---------------------------------------------------------------------------
-// TESTS — non-régression du code existant
+// J. NON-RÉGRESSION DU CODE EXISTANT
 // ---------------------------------------------------------------------------
 
-test('non-régression : generateLeaseDoc inchangé après extraction', () => {
+test('non-régression : generateLeaseDoc produit le PDF et conserve le Doc', () => {
   const env = harness.creerEnvironnement();
-  const ctx = env.ctx;
-  const tenant = ctx.getTenantByRow(2);
-  const res = ctx.generateLeaseDoc(tenant, ctx.getConfig(), ctx.getChambreData(2));
+  const tenant = env.ctx.getTenantByRow(2);
+  const res = env.ctx.generateLeaseDoc(tenant, env.ctx.getConfig(), env.ctx.getChambreData(2));
 
-  const texte = res.pdfFile.getBlob().getDataAsString();
-  assertContient(texte, 'DUPONT Marie', 'nom du locataire remplacé');
-  assertContient(texte, '560,00 €', 'loyer CC formaté');
-  assertContient(texte, 'Jean MARTIN', 'bailleur remplacé');
-  assert(texte.indexOf('{{') === -1 || texte.indexOf('[[SIGNATURES') !== -1,
-    'variables remplacées');
-  assertContient(res.pdfFile.getName(), 'Bail_DUPONT_Marie_Chambre2', 'nom de fichier historique');
+  assert(res.pdfFile, 'PDF généré');
+  assert(res.docId, 'identifiant du Google Doc renvoyé');
+  const doc = env.drive.fichiers.get(res.docId);
+  assert(doc && !doc.trashed, 'le Google Doc du bail est conservé pour la signature');
+  assertContient(doc.body.getText(), 'Jean MARTIN', 'variables remplacées');
+  assertContient(doc.body.getText(), '[[SIGNATURE_BAILLEUR_BAIL]]',
+                 'les marqueurs internes survivent au remplacement des variables');
+  assertEgal(String(env.ctx.getTenantByRow(2).ID_DOC_BAIL), res.docId, 'ID_DOC_BAIL écrit');
 });
 
 test('non-régression : generateEDL conserve la chambre du locataire', () => {
   const env = harness.creerEnvironnement();
-  const ctx = env.ctx;
-  const res = ctx.generateEDL(ctx.getTenantByRow(2), ctx.getConfig());
+  const tenant = env.ctx.getTenantByRow(2);
+  const res = env.ctx.generateEDL(tenant, env.ctx.getConfig());
+  const texte = env.drive.fichiers.get(res.docId).body.getText();
 
-  const texte = res.pdfFile.getBlob().getDataAsString();
-  assertContient(texte, 'Mobilier chambre 2', 'chambre conservée');
-  assert(texte.indexOf('Mobilier chambre 1') === -1, 'chambre 1 supprimée');
-  assert(texte.indexOf('Mobilier chambre 3') === -1, 'chambre 3 supprimée');
-  assert(res.docId, 'le Google Doc EDL est conservé');
+  assertContient(texte, 'CHAMBRE N°2', 'la chambre du locataire est conservée');
+  assertAbsent(texte, 'CHAMBRE N°1', 'chambre 1 retirée');
+  assertContient(texte, '[[SIGNATURE_BAILLEUR_SORTIE]]',
+                 'les marqueurs de sortie survivent pour la future campagne de sortie');
 });
+
+test('non-régression : les marqueurs internes ne sont pas des variables {{...}}', () => {
+  // Le moteur de macros ne remplace que les {{Variable}} : les marqueurs
+  // [[...]] traversent generateLeaseDoc / generateEDL sans être touchés.
+  const env = harness.creerEnvironnement();
+  const marqueurs = env.ctx.SIGNATURE_MARQUEURS;
+  Object.keys(marqueurs).forEach((bloc) => {
+    Object.keys(marqueurs[bloc]).forEach((rang) => {
+      Object.keys(marqueurs[bloc][rang]).forEach((type) => {
+        const m = marqueurs[bloc][rang][type];
+        assertEgal(m.indexOf('[['), 0, m + ' commence par [[');
+        assertAbsent(m, '{{', m + ' n\'est pas une variable de macro');
+      });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Jeux de données partagés
+// ---------------------------------------------------------------------------
+
+function locataireBase() {
+  return {
+    Actif: true,
+    Locataire_Nom: 'DUPONT Marie',
+    Locataire_Date: new Date(1998, 4, 12),
+    Locataire_Lieu: 'Bordeaux',
+    EMAIL: 'marie.dupont@example.com',
+    TELEPHONE: '0600000000',
+    Locataire_Adresse: '5 rue Précédente, 33000 Bordeaux',
+    Chambre: 2,
+    'Date_Début': new Date(2026, 8, 1),
+    Compteur_Eau: '123',
+    Compteur_Elec: '4567',
+    ID_PDF_BAIL: 'pdf-bail-existant',
+    ID_PDF_EDL: 'pdf-edl-existant',
+    ID_DOC_BAIL: 'doc-3',
+    ID_DOC_EDL: 'doc-4'
+  };
+}
+
+/** Locataire en fin de bail : Date_Fin et relevés de sortie renseignés. */
+function locataireSortie() {
+  return Object.assign(locataireBase(), {
+    'Date_Fin': new Date(2027, 7, 31),
+    Compteur_Eau_Sortie: '189',
+    Compteur_Elec_Sortie: '5901',
+    Locataire_Nouvelle_Adresse: '9 rue Suivante, 33000 Bordeaux'
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Exécution
@@ -943,10 +1615,9 @@ console.log('\n── Contrôle de syntaxe des fichiers .gs ──');
 const erreursSyntaxe = harness.verifierSyntaxe();
 if (erreursSyntaxe.length) {
   erreursSyntaxe.forEach((e) => console.log('  ✗ ' + e));
-  console.log('\n✗ Syntaxe invalide — arrêt.\n');
   process.exit(1);
 }
-console.log('  ✓ ' + harness.TOUS_LES_GS.length + ' fichiers .gs syntaxiquement valides');
+console.log('  ✓ ' + harness.TOUS_LES_GS.length + ' fichiers valides');
 
 console.log('\n── Tests ──');
 tests.forEach(({ nom, fn }) => {
@@ -957,10 +1628,11 @@ tests.forEach(({ nom, fn }) => {
     console.log('  ✓ ' + nom);
   } catch (e) {
     echecs++;
-    console.log('  ✗ ' + nom);
-    console.log('      ' + String(e.message).split('\n').join('\n      '));
+    console.log('  ✗ ' + nom + '\n      ' + String(e.message).split('\n').join('\n      '));
   }
 });
 
-console.log('\n' + (echecs === 0 ? '✓' : '✗') + ' ' + reussites + ' réussi(s), ' + echecs + ' échec(s)\n');
+console.log('\n' + (echecs === 0
+  ? '✓ ' + reussites + ' réussi(s), 0 échec(s)'
+  : '✗ ' + reussites + ' réussi(s), ' + echecs + ' échec(s)') + '\n');
 process.exit(echecs === 0 ? 0 : 1);

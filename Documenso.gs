@@ -14,28 +14,37 @@
 //   DOCUMENSO_MAX_TENTATIVES(optionnel)   Défaut : 3 (1 appel + 2 reprises).
 //   DOCUMENSO_ENDPOINT_<CLE>(optionnel)   Surcharge d'un chemin (cf. DOCUMENSO_ENDPOINTS).
 //
-// ⚠️ ÉTAT DE VÉRIFICATION DES ENDPOINTS
-// L'environnement de développement de ce dépôt n'a pas accès au réseau vers
-// docs.documenso.com / app.documenso.com / openapi.documenso.com (bloqués par
-// la politique de sortie). Les chemins ci-dessous proviennent de la
-// documentation publique telle qu'indexée par les moteurs de recherche :
+// ÉTAT DE VÉRIFICATION DES ENDPOINTS
+// Les chemins, noms de champs et formes de réponse ci-dessous ont été relevés
+// dans le SDK officiel @documenso/sdk-typescript v0.9.0 (généré depuis
+// l'OpenAPI Documenso), et non devinés :
 //
-//   VÉRIFIÉ (documentation publique concordante) :
-//     POST /envelope/create              (multipart/form-data : payload + files)
-//     POST /envelope/distribute          ({ envelopeId, meta? })
-//     GET  /envelope/{envelopeId}
-//     GET  /envelope/item/{envelopeItemId}/download
-//     Authorization: api_xxxxxxxx        (pas de préfixe "Bearer")
+//   POST /envelope/create      multipart : champ « payload » (JSON) + champs
+//                              « files[] » (un par PDF). Réponse : { id }.
+//   POST /envelope/distribute  { envelopeId, meta? } → { success, id,
+//                              recipients: [{ id, name, email, token, role,
+//                              signingOrder, signingUrl }] }
+//   GET  /envelope/{envelopeId}  → { status, externalId, recipients[], fields[],
+//                              envelopeItems[], ... }
+//                              recipients[] : { id, email, name, token, role,
+//                                signingStatus, sendStatus, signedAt,
+//                                signingOrder, rejectionReason }
+//                              fields[]     : { id, envelopeItemId, type,
+//                                recipientId, page, inserted }
+//                              envelopeItems[] : { id, title, order }
+//   GET  /envelope/item/{envelopeItemId}/download?version=signed|original|pending
+//   GET  /envelope/{envelopeId}/certificate/download
+//   GET  /envelope/{envelopeId}/audit-log/download
+//   POST /envelope/cancel      { envelopeId, reason? } → { success }
+//   Authorization: api_xxxxxxxx        (apiKey brut, pas de préfixe "Bearer")
+//   Statuts d'enveloppe : DRAFT | PENDING | COMPLETED | REJECTED | CANCELLED
+//   signingStatus        : NOT_SIGNED | SIGNED | REJECTED
 //
-//   À CONFIRMER avant la première utilisation réelle (OpenAPI officielle) :
-//     POST /envelope/delete              (annulation / suppression)
-//     GET  /envelope/{id}/certificate/download
-//     GET  /envelope/{id}/audit-log/download
-//
-// Tous les chemins sont surchargeables sans toucher au code, via une propriété
-// de script DOCUMENSO_ENDPOINT_<CLE> (ex. DOCUMENSO_ENDPOINT_ENVELOPEDELETE).
-// Les réponses sont lues de façon tolérante (plusieurs noms de champs admis)
-// pour absorber les écarts de nommage.
+// Tous les chemins restent surchargeables sans toucher au code, via une
+// propriété de script DOCUMENSO_ENDPOINT_<CLE> (ex.
+// DOCUMENSO_ENDPOINT_ENVELOPECANCEL). Les réponses sont lues de façon
+// tolérante (plusieurs noms de champs admis) pour absorber une évolution de
+// nommage sans casse.
 // =============================================================================
 
 
@@ -53,11 +62,21 @@ var DOCUMENSO_ENDPOINTS = {
   envelopeCreate:      { method: 'post', path: '/envelope/create' },
   envelopeGet:         { method: 'get',  path: '/envelope/{envelopeId}' },
   envelopeDistribute:  { method: 'post', path: '/envelope/distribute' },
-  envelopeDelete:      { method: 'post', path: '/envelope/delete' },
+  envelopeCancel:      { method: 'post', path: '/envelope/cancel' },
   itemDownload:        { method: 'get',  path: '/envelope/item/{envelopeItemId}/download' },
   certificateDownload: { method: 'get',  path: '/envelope/{envelopeId}/certificate/download' },
   auditLogDownload:    { method: 'get',  path: '/envelope/{envelopeId}/audit-log/download' }
 };
+
+/**
+ * Nom du champ multipart portant les fichiers. Le SDK officiel envoie
+ * « files[] » ; un tableau HTTP se répète sous le même nom, ce qu'UrlFetchApp
+ * ne sait pas faire seul (d'où documensoBuildMultipart).
+ */
+var DOCUMENSO_CHAMP_FICHIERS = 'files[]';
+
+/** Rôle Documenso des deux parties. Le projet n'utilise que SIGNER. */
+var DOCUMENSO_ROLE_SIGNATAIRE = 'SIGNER';
 
 /** Codes d'erreur exposés au métier (Signature.gs les traduit pour l'UI). */
 var DOCUMENSO_ERREURS = {
@@ -159,7 +178,13 @@ function documensoMaskEmail(email) {
 
 /**
  * Nettoie un extrait de réponse API avant de l'inclure dans un message :
- * tronque et masque les adresses email (données personnelles).
+ * tronque, masque les adresses email (données personnelles) et expurge tout
+ * ce qui ressemble à un token.
+ *
+ * Le masquage du token n'est pas théorique : une API qui renvoie la requête
+ * fautive dans son message d'erreur y inclut l'en-tête Authorization, et cet
+ * extrait finit dans la colonne lastErrorMessage du Sheet.
+ *
  * @param {string} texte
  * @param {number} [max] — Longueur maximale conservée (défaut 300).
  * @return {string}
@@ -170,7 +195,33 @@ function documensoExtraitSur(texte, max) {
   s = s.replace(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g, function(m) {
     return documensoMaskEmail(m);
   });
+  s = documensoExpurgerSecrets(s);
   if (s.length > max) s = s.substring(0, max) + '…';
+  return s;
+}
+
+/**
+ * Remplace par « *** » tout ce qui ressemble à un secret : un token Documenso
+ * (api_…), une valeur d'en-tête Authorization, ou le token réellement
+ * configuré s'il apparaît tel quel.
+ *
+ * @param {string} texte
+ * @return {string}
+ */
+function documensoExpurgerSecrets(texte) {
+  var s = (texte || '').toString();
+
+  // Le token configuré, quelle que soit sa forme.
+  var token = documensoProp('DOCUMENSO_API_TOKEN', '');
+  if (token && token.length >= 8) {
+    while (s.indexOf(token) !== -1) s = s.replace(token, '***');
+  }
+
+  // Toute chaîne ayant la forme d'un token d'API Documenso.
+  s = s.replace(/\bapi_[A-Za-z0-9_\-]{8,}/g, 'api_***');
+  // Un en-tête Authorization recopié dans le message.
+  s = s.replace(/(authorization\s*[:=]\s*)(bearer\s+)?\S+/gi, '$1***');
+
   return s;
 }
 
@@ -287,9 +338,10 @@ DocumensoClient.prototype._authHeader = function() {
  * Résout un endpoint (chemin + méthode), surcharge de script prioritaire.
  * @param {string} cle — Clé de DOCUMENSO_ENDPOINTS.
  * @param {Object} [params] — Valeurs des segments {xxx} du chemin.
+ * @param {Object} [query] — Paramètres de requête à ajouter (valeurs vides ignorées).
  * @return {{method:string, url:string}}
  */
-DocumensoClient.prototype._endpoint = function(cle, params) {
+DocumensoClient.prototype._endpoint = function(cle, params, query) {
   var def = DOCUMENSO_ENDPOINTS[cle];
   if (!def) throw new DocumensoError('Endpoint inconnu : ' + cle, { code: DOCUMENSO_ERREURS.REQUETE_INVALIDE });
 
@@ -304,7 +356,17 @@ DocumensoClient.prototype._endpoint = function(cle, params) {
     return encodeURIComponent(v.toString());
   });
 
-  return { method: def.method, url: this.baseUrl + chemin };
+  var url = this.baseUrl + chemin;
+  if (query) {
+    var morceaux = [];
+    for (var cleQ in query) {
+      var val = query[cleQ];
+      if (val === undefined || val === null || val === '') continue;
+      morceaux.push(encodeURIComponent(cleQ) + '=' + encodeURIComponent(val.toString()));
+    }
+    if (morceaux.length) url += (url.indexOf('?') === -1 ? '?' : '&') + morceaux.join('&');
+  }
+  return { method: def.method, url: url };
 };
 
 /** true si le code HTTP justifie une reprise automatique. */
@@ -458,23 +520,22 @@ DocumensoClient.prototype._json = function(reponse, stage) {
 };
 
 
-// --- 4.1 Création de l'enveloppe -------------------------------------------
+// --- 4.1 Destinataires ------------------------------------------------------
 
 /**
- * Normalise les signataires métier en destinataires Documenso.
+ * Projette les signataires métier en destinataires Documenso.
  *
- * L'API V2 accepte les destinataires directement à la création de
- * l'enveloppe : l'ordre du tableau détermine r1, r2, r3… (le placeholder
- * {{signature, r1}} vise le PREMIER destinataire créé). Cette méthode est donc
- * une projection pure — elle n'émet aucun appel HTTP — mais reste le point
- * unique où la correspondance rN ↔ personne est décidée.
+ * L'ordre du tableau détermine le rang : le premier élément est r1 (le
+ * bailleur), le second r2 (le locataire). C'est ce rang que visent les
+ * placeholders {{signature,rN}} analysés par Documenso à l'upload du PDF.
  *
- * @param {Array<Object>} signataires — [{ email, nom, role?, ordre? }] dans l'ordre r1, r2, …
- * @param {Object} [options] — { sequentiel: boolean }.
- * @return {Array<Object>} Destinataires prêts pour le payload.
+ * Projection pure — aucun appel HTTP — mais point unique où la correspondance
+ * rN ↔ personne est décidée.
+ *
+ * @param {Array<Object>} signataires — [{ email, nom }] dans l'ordre r1, r2, …
+ * @return {Array<Object>} Destinataires prêts pour le payload, avec signingOrder.
  */
-DocumensoClient.prototype.addOrMapRecipients = function(signataires, options) {
-  options = options || {};
+DocumensoClient.prototype.mapRecipients = function(signataires) {
   if (!signataires || !signataires.length) {
     throw new DocumensoError('Aucun signataire fourni pour l\'enveloppe.',
       { code: DOCUMENSO_ERREURS.REQUETE_INVALIDE, stage: 'recipients', safeToRetry: true });
@@ -485,29 +546,31 @@ DocumensoClient.prototype.addOrMapRecipients = function(signataires, options) {
       throw new DocumensoError('Signataire r' + (i + 1) + ' sans adresse email.',
         { code: DOCUMENSO_ERREURS.REQUETE_INVALIDE, stage: 'recipients', safeToRetry: true });
     }
-    var dest = {
+    return {
       email: s.email,
       name: s.nom || '',
-      role: s.role || 'SIGNER'
+      role: DOCUMENSO_ROLE_SIGNATAIRE,
+      // Signature séquentielle systématique : le bailleur (1) puis le
+      // locataire (2). Documenso ne sollicite r2 qu'une fois r1 signé.
+      signingOrder: i + 1
     };
-    // signingOrder n'est envoyé QUE si une signature séquentielle est demandée :
-    // en mode parallèle (défaut), on garde le payload minimal.
-    if (options.sequentiel) dest.signingOrder = (s.ordre || (i + 1));
-    return dest;
   });
 };
 
+
+// --- 4.2 Création de l'enveloppe (brouillon) --------------------------------
+
 /**
- * Crée une enveloppe en brouillon avec ses fichiers PDF et ses destinataires.
- * Les placeholders {{signature, rN}} présents dans les PDF sont détectés par
- * Documenso au moment de l'upload et transformés en champs.
+ * Crée une enveloppe EN BROUILLON avec ses PDF et ses destinataires.
+ * Les placeholders {{signature,rN}} / {{date,rN}} présents dans les PDF sont
+ * détectés par Documenso à l'upload et transformés en champs — d'où la
+ * vérification obligatoire par validateDetectedFields avant distribution.
  *
  * @param {Object} spec — {
  *     titre: string,
  *     externalId: string,
  *     fichiers: Array<{nom: string, blob: Blob}>,
- *     signataires: Array<{email, nom, role?}>,   // ordre = r1, r2, …
- *     sequentiel?: boolean,
+ *     signataires: Array<{email, nom}>,          // ordre = r1, r2
  *     meta?: Object                              // subject / message / timezone
  *   }
  * @return {{envelopeId: string, brut: Object, payload: Object}}
@@ -522,18 +585,19 @@ DocumensoClient.prototype.createEnvelope = function(spec) {
     type: 'DOCUMENT',
     title: spec.titre,
     externalId: spec.externalId,
-    recipients: this.addOrMapRecipients(spec.signataires, { sequentiel: !!spec.sequentiel })
+    recipients: this.mapRecipients(spec.signataires),
+    // Mode séquentiel : c'est la convention métier du projet (le bailleur
+    // signe, puis Documenso sollicite le locataire).
+    meta: { signingOrder: 'SEQUENTIAL' }
   };
-  if (spec.sequentiel) payload.meta = { signingOrder: 'SEQUENTIAL' };
   if (spec.meta) {
-    payload.meta = payload.meta || {};
     for (var k in spec.meta) payload.meta[k] = spec.meta[k];
   }
 
   var parts = [{ name: 'payload', value: JSON.stringify(payload) }];
   for (var i = 0; i < spec.fichiers.length; i++) {
     parts.push({
-      name: 'files',
+      name: DOCUMENSO_CHAMP_FICHIERS,
       filename: spec.fichiers[i].nom,
       blob: spec.fichiers[i].blob,
       contentType: 'application/pdf'
@@ -570,73 +634,331 @@ DocumensoClient.prototype.createEnvelope = function(spec) {
  */
 function documensoExtraireEnvelopeId(json) {
   var id = documensoPick(json || {}, [
+    'id', 'envelope.id', 'data.id',
     'envelopeId', 'envelope.envelopeId', 'data.envelopeId',
-    'secondaryId', 'envelope.secondaryId', 'data.secondaryId',
-    'id', 'envelope.id', 'data.id'
+    'secondaryId', 'envelope.secondaryId', 'data.secondaryId'
   ]);
   return id === null ? null : id.toString();
 }
 
 
-// --- 4.2 Vérification des champs détectés ----------------------------------
+// --- 4.3 Lecture d'une enveloppe -------------------------------------------
 
 /**
- * Vérifie que Documenso a bien créé, pour CHAQUE signataire attendu, au moins
- * un champ de signature à partir des placeholders du PDF.
+ * Lit une enveloppe et la normalise.
  *
- * @param {string} envelopeId — Identifiant de l'enveloppe.
- * @param {Array<Object>} signataires — Signataires attendus (ordre r1, r2, …).
- * @return {{ok: boolean, problemes: string[], parSignataire: Object[]}}
+ * @param {string} envelopeId
+ * @return {Object} Enveloppe normalisée (cf. documensoNormaliserEnveloppe).
  */
-DocumensoClient.prototype.validateDetectedFields = function(envelopeId, signataires) {
-  var enveloppe = this.getEnvelopeStatus(envelopeId);
-  var destinataires = enveloppe.destinataires || [];
-  var problemes = [];
-  var parSignataire = [];
+DocumensoClient.prototype.getEnvelope = function(envelopeId) {
+  var ep = this._endpoint('envelopeGet', { envelopeId: envelopeId });
+  var reponse = this._fetch(ep.method, ep.url, {
+    accept: 'application/json',
+    stage: 'get',
+    envelopeId: envelopeId
+  });
+  return documensoNormaliserEnveloppe(this._json(reponse, 'get'));
+};
 
+/**
+ * Alias historique de getEnvelope, conservé pour la lisibilité des appels de
+ * suivi (« quel est le statut de cette enveloppe ? »).
+ * @param {string} envelopeId
+ * @return {Object}
+ */
+DocumensoClient.prototype.getEnvelopeStatus = function(envelopeId) {
+  return this.getEnvelope(envelopeId);
+};
+
+/**
+ * Normalise la représentation d'une enveloppe (tolérante au nommage).
+ *
+ * @param {Object} json — Réponse brute de GET /envelope/{id}.
+ * @return {{
+ *   statut: string, externalId: string,
+ *   destinataires: Array<{id, email, nom, statutSignature, signeLe, ordre, jeton, motifRefus}>,
+ *   champs: Array<{id, envelopeItemId, type, recipientId}>,
+ *   elements: Array<{id, titre, ordre}>,
+ *   brut: Object
+ * }}
+ */
+function documensoNormaliserEnveloppe(json) {
+  json = json || {};
+  var racine = (json.envelope && typeof json.envelope === 'object') ? json.envelope :
+               (json.data && typeof json.data === 'object' && json.data.status) ? json.data : json;
+
+  var statut = documensoPick(racine, ['status', 'envelopeStatus', 'state']);
+  statut = statut ? statut.toString().toUpperCase() : '';
+
+  var destBruts = racine.recipients || racine.envelopeRecipients || [];
+  var destinataires = [];
+  for (var i = 0; i < destBruts.length; i++) {
+    var d = destBruts[i] || {};
+    destinataires.push({
+      id: (d.id === undefined || d.id === null) ? null : d.id.toString(),
+      email: (d.email || '').toString(),
+      nom: (d.name || '').toString(),
+      statutSignature: (d.signingStatus || d.status || '').toString().toUpperCase(),
+      statutEnvoi: (d.sendStatus || '').toString().toUpperCase(),
+      signeLe: d.signedAt || null,
+      ordre: (d.signingOrder === undefined || d.signingOrder === null) ? null : d.signingOrder,
+      jeton: (d.token || '').toString(),
+      motifRefus: (d.rejectionReason || '').toString()
+    });
+  }
+
+  // Les champs sont soit portés par l'enveloppe (format V2), soit rattachés à
+  // chaque destinataire : on accepte les deux.
+  var champsBruts = (racine.fields || []).slice(0);
+  for (var r = 0; r < destBruts.length; r++) {
+    var sousChamps = (destBruts[r] && destBruts[r].fields) || [];
+    for (var s = 0; s < sousChamps.length; s++) {
+      var copie = {};
+      for (var k in sousChamps[s]) copie[k] = sousChamps[s][k];
+      if (copie.recipientId === undefined) copie.recipientId = destBruts[r].id;
+      champsBruts.push(copie);
+    }
+  }
+
+  var champs = [];
+  for (var f = 0; f < champsBruts.length; f++) {
+    var c = champsBruts[f] || {};
+    champs.push({
+      id: (c.id === undefined || c.id === null) ? null : c.id.toString(),
+      envelopeItemId: (c.envelopeItemId === undefined || c.envelopeItemId === null)
+        ? null : c.envelopeItemId.toString(),
+      type: (c.type || '').toString().toUpperCase(),
+      recipientId: (c.recipientId === undefined || c.recipientId === null)
+        ? null : c.recipientId.toString()
+    });
+  }
+
+  var elemBruts = racine.envelopeItems || racine.items || racine.documents || [];
+  var elements = [];
+  for (var j = 0; j < elemBruts.length; j++) {
+    var e = elemBruts[j] || {};
+    var id = documensoPick(e, ['id', 'envelopeItemId', 'secondaryId']);
+    elements.push({
+      id: id === null ? null : id.toString(),
+      titre: (e.title || e.name || '').toString(),
+      ordre: (e.order === undefined || e.order === null) ? j : e.order
+    });
+  }
+  elements.sort(function(a, b) { return a.ordre - b.ordre; });
+
+  return {
+    statut: statut,
+    externalId: (racine.externalId || '').toString(),
+    destinataires: destinataires,
+    champs: champs,
+    elements: elements,
+    brut: json
+  };
+}
+
+
+// --- 4.4 Vérification des champs détectés -----------------------------------
+
+/**
+ * Vérifie que Documenso a créé EXACTEMENT les champs attendus à partir des
+ * placeholders des PDF, avant toute distribution.
+ *
+ * Fonction PURE : elle prend une enveloppe déjà normalisée, n'émet aucun appel
+ * HTTP, et est donc directement testable.
+ *
+ * Contrôles (cf. exigences métier) :
+ *   • chaque document attendu est présent dans l'enveloppe ;
+ *   • aucun document en trop ;
+ *   • pour chaque document : le nombre exact de champs attendus, ni plus ni moins ;
+ *   • chaque champ attendu (type × destinataire) est présent une seule fois ;
+ *   • aucun champ attribué à un destinataire inconnu ou au mauvais rang ;
+ *   • chaque signataire possède au moins un champ dans chaque document.
+ *
+ * @param {Object} enveloppe — Enveloppe normalisée (getEnvelope).
+ * @param {Array<Object>} signataires — [{ email }] dans l'ordre r1, r2.
+ * @param {Array<Object>} attendus — Un élément par PDF envoyé, dans l'ordre :
+ *   { cle: string, titre: string, champs: [{ type: 'SIGNATURE'|'DATE', rang: 'r1' }] }
+ * @return {{ok:boolean, problemes:string[], parDocument:Array<Object>, total:number}}
+ */
+DocumensoClient.prototype.validateDetectedFields = function(enveloppe, signataires, attendus) {
+  return documensoValiderChamps(enveloppe, signataires, attendus);
+};
+
+/**
+ * Implémentation de la vérification des champs (hors prototype pour rester
+ * appelable sans instancier de client — notamment depuis les tests).
+ * @see DocumensoClient.prototype.validateDetectedFields
+ */
+function documensoValiderChamps(enveloppe, signataires, attendus) {
+  enveloppe = enveloppe || {};
+  signataires = signataires || [];
+  attendus = attendus || [];
+
+  var problemes = [];
+  var destinataires = enveloppe.destinataires || [];
+  var elements = enveloppe.elements || [];
+  var champs = enveloppe.champs || [];
+
+  // --- 1. Correspondance rang ↔ recipientId --------------------------------
+  var rangParRecipientId = {};   // recipientId → 'r1' | 'r2'
+  var recipientIdParRang = {};
   for (var i = 0; i < signataires.length; i++) {
-    var attendu = signataires[i];
+    var rang = 'r' + (i + 1);
+    var attenduEmail = (signataires[i].email || '').toLowerCase();
     var trouve = null;
     for (var j = 0; j < destinataires.length; j++) {
-      if ((destinataires[j].email || '').toLowerCase() === (attendu.email || '').toLowerCase()) {
+      if ((destinataires[j].email || '').toLowerCase() === attenduEmail) {
         trouve = destinataires[j];
         break;
       }
     }
-
-    var rang = 'r' + (i + 1);
     if (!trouve) {
-      problemes.push(rang + ' (' + documensoMaskEmail(attendu.email) +
+      problemes.push(rang + ' (' + documensoMaskEmail(signataires[i].email) +
                      ') : destinataire absent de l\'enveloppe créée.');
-      parSignataire.push({ rang: rang, email: attendu.email, champs: 0, signature: false });
       continue;
     }
-
-    var champs = trouve.champs || [];
-    var aSignature = false;
-    for (var f = 0; f < champs.length; f++) {
-      var type = (champs[f].type || '').toString().toUpperCase();
-      if (type.indexOf('SIGNATURE') !== -1) { aSignature = true; break; }
+    if (trouve.id === null) {
+      problemes.push(rang + ' (' + documensoMaskEmail(signataires[i].email) +
+                     ') : destinataire sans identifiant, impossible de rattacher ses champs.');
+      continue;
     }
-    if (!aSignature) {
-      problemes.push(rang + ' (' + documensoMaskEmail(attendu.email) +
-                     ') : aucun champ de signature détecté. Vérifiez le placeholder ' +
-                     '{{signature, ' + rang + '}} dans le PDF (police standard, une seule ligne).');
-    }
-    parSignataire.push({ rang: rang, email: attendu.email, champs: champs.length, signature: aSignature });
+    rangParRecipientId[trouve.id] = rang;
+    recipientIdParRang[rang] = trouve.id;
   }
 
-  return { ok: problemes.length === 0, problemes: problemes, parSignataire: parSignataire };
-};
+  // --- 2. Correspondance document attendu ↔ envelopeItem -------------------
+  // Priorité au titre (le nom de fichier envoyé), repli sur l'ordre d'envoi :
+  // les deux sont déterministes, jamais « envelopeItems[0] ».
+  var itemParCle = {};
+  var itemsUtilises = {};
+  for (var a = 0; a < attendus.length; a++) {
+    var att = attendus[a];
+    var item = null;
+    for (var e = 0; e < elements.length; e++) {
+      if (itemsUtilises[elements[e].id]) continue;
+      if (elements[e].titre && att.titre &&
+          documensoNormaliserTitre(elements[e].titre) === documensoNormaliserTitre(att.titre)) {
+        item = elements[e];
+        break;
+      }
+    }
+    if (!item && elements[a] && !itemsUtilises[elements[a].id]) item = elements[a];
+    if (!item) {
+      problemes.push('Document attendu absent de l\'enveloppe : « ' + (att.titre || att.cle) + ' ».');
+      continue;
+    }
+    itemsUtilises[item.id] = true;
+    itemParCle[att.cle] = item;
+  }
+
+  var enTrop = elements.filter(function(el) { return !itemsUtilises[el.id]; });
+  for (var t = 0; t < enTrop.length; t++) {
+    problemes.push('Document inattendu dans l\'enveloppe : « ' +
+                   (enTrop[t].titre || enTrop[t].id) + ' ».');
+  }
+
+  // --- 3. Champs par document ----------------------------------------------
+  var parDocument = [];
+  var total = 0;
+
+  for (var d = 0; d < attendus.length; d++) {
+    var attendu = attendus[d];
+    var element = itemParCle[attendu.cle];
+    var detail = { cle: attendu.cle, titre: attendu.titre, envelopeItemId: element ? element.id : null,
+                   champs: 0, attendus: attendu.champs.length };
+    if (!element) { parDocument.push(detail); continue; }
+
+    var champsDoc = champs.filter(function(c) { return c.envelopeItemId === element.id; });
+    detail.champs = champsDoc.length;
+    total += champsDoc.length;
+
+    // Chaque champ attendu doit exister exactement une fois.
+    var consommes = {};
+    for (var x = 0; x < attendu.champs.length; x++) {
+      var ch = attendu.champs[x];
+      var idAttendu = recipientIdParRang[ch.rang];
+      var occurrences = [];
+      for (var y = 0; y < champsDoc.length; y++) {
+        if (champsDoc[y].type === ch.type && champsDoc[y].recipientId === idAttendu) {
+          occurrences.push(y);
+        }
+      }
+      if (!idAttendu) continue;   // problème déjà signalé au niveau destinataire
+      if (occurrences.length === 0) {
+        problemes.push('« ' + (attendu.titre || attendu.cle) + ' » : champ ' + ch.type.toLowerCase() +
+                       ' manquant pour ' + ch.rang + '. Vérifiez le placeholder {{' +
+                       ch.type.toLowerCase() + ',' + ch.rang + '}} dans le PDF (une seule ligne, ' +
+                       'police standard).');
+      } else if (occurrences.length > 1) {
+        problemes.push('« ' + (attendu.titre || attendu.cle) + ' » : ' + occurrences.length +
+                       ' champs ' + ch.type.toLowerCase() + ' pour ' + ch.rang +
+                       ' au lieu d\'un seul (marqueur laissé en double dans le modèle ?).');
+      }
+      for (var o = 0; o < occurrences.length; o++) consommes[occurrences[o]] = true;
+    }
+
+    // Tout champ non consommé est en trop : mauvais type, ou mauvais destinataire.
+    for (var z = 0; z < champsDoc.length; z++) {
+      if (consommes[z]) continue;
+      var rangReel = rangParRecipientId[champsDoc[z].recipientId];
+      problemes.push('« ' + (attendu.titre || attendu.cle) + ' » : champ ' +
+                     (champsDoc[z].type || '(sans type)') + ' inattendu' +
+                     (rangReel ? ' attribué à ' + rangReel
+                               : ' attribué à un destinataire inconnu (id ' +
+                                 champsDoc[z].recipientId + ')') + '.');
+    }
+
+    if (champsDoc.length !== attendu.champs.length) {
+      problemes.push('« ' + (attendu.titre || attendu.cle) + ' » : ' + champsDoc.length +
+                     ' champ(s) détecté(s) au lieu de ' + attendu.champs.length + '.');
+    }
+
+    // Chaque signataire doit avoir au moins un champ dans CE document.
+    for (var rr = 0; rr < signataires.length; rr++) {
+      var rangAttendu = 'r' + (rr + 1);
+      var idDest = recipientIdParRang[rangAttendu];
+      if (!idDest) continue;
+      var aUnChamp = champsDoc.some(function(c) { return c.recipientId === idDest; });
+      if (!aUnChamp) {
+        problemes.push('« ' + (attendu.titre || attendu.cle) + ' » : aucun champ pour ' +
+                       rangAttendu + ' — ce signataire n\'aurait rien à signer.');
+      }
+    }
+
+    parDocument.push(detail);
+  }
+
+  // --- 4. Champs rattachés à un document hors périmètre --------------------
+  var idsAttendus = {};
+  for (var q in itemParCle) idsAttendus[itemParCle[q].id] = true;
+  var orphelins = champs.filter(function(c) { return !idsAttendus[c.envelopeItemId]; });
+  if (orphelins.length) {
+    problemes.push(orphelins.length + ' champ(s) rattaché(s) à un document non attendu — ' +
+                   'l\'enveloppe ne correspond pas à ce qui a été envoyé.');
+  }
+
+  return { ok: problemes.length === 0, problemes: problemes, parDocument: parDocument, total: total };
+}
+
+/** Normalise un titre de document pour la comparaison (casse, extension, espaces). */
+function documensoNormaliserTitre(titre) {
+  return (titre || '').toString().trim().toLowerCase().replace(/\.pdf$/, '');
+}
 
 
-// --- 4.3 Distribution -------------------------------------------------------
+// --- 4.5 Distribution -------------------------------------------------------
 
 /**
  * Distribue (envoie) l'enveloppe à ses destinataires.
+ *
+ * La réponse porte l'URL de signature de chaque destinataire : c'est elle qui
+ * alimente le bouton « Signer maintenant » du bailleur. En mode séquentiel,
+ * seul r1 est réellement sollicité par email ; l'URL de r2 n'est utilisable
+ * qu'une fois r1 signé, et n'est donc jamais présentée à l'utilisateur.
+ *
  * @param {string} envelopeId
  * @param {Object} [meta] — { subject, message, timezone } — optionnel.
- * @return {Object} Réponse brute.
+ * @return {{succes:boolean, envelopeId:string, destinataires:Array<{id,email,nom,jeton,url,ordre}>, brut:Object}}
  */
 DocumensoClient.prototype.distributeEnvelope = function(envelopeId, meta) {
   var corps = { envelopeId: envelopeId };
@@ -650,142 +972,97 @@ DocumensoClient.prototype.distributeEnvelope = function(envelopeId, meta) {
     stage: 'distribute',
     envelopeId: envelopeId
   });
-  return this._json(reponse, 'distribute');
-};
 
-
-// --- 4.4 Statut -------------------------------------------------------------
-
-/**
- * Lit l'état d'une enveloppe et le normalise.
- *
- * @param {string} envelopeId
- * @return {{statut:string, destinataires:Array, elements:Array, brut:Object}}
- *   statut — valeur Documenso brute en majuscules (DRAFT, PENDING, COMPLETED, REJECTED…).
- *   destinataires — [{ email, nom, statutSignature, champs: [{type}] }]
- *   elements — [{ id, titre }] (documents de l'enveloppe, pour le téléchargement)
- */
-DocumensoClient.prototype.getEnvelopeStatus = function(envelopeId) {
-  var ep = this._endpoint('envelopeGet', { envelopeId: envelopeId });
-  var reponse = this._fetch(ep.method, ep.url, {
-    accept: 'application/json',
-    stage: 'get',
-    envelopeId: envelopeId
-  });
-  var json = this._json(reponse, 'get');
-  return documensoNormaliserEnveloppe(json);
-};
-
-/**
- * Normalise la représentation d'une enveloppe (tolérante au nommage).
- * @param {Object} json — Réponse brute.
- * @return {{statut:string, destinataires:Array, elements:Array, brut:Object}}
- */
-function documensoNormaliserEnveloppe(json) {
-  json = json || {};
-  var racine = (json.envelope && typeof json.envelope === 'object') ? json.envelope :
-               (json.data && typeof json.data === 'object' && json.data.status) ? json.data : json;
-
-  var statut = documensoPick(racine, ['status', 'envelopeStatus', 'state']);
-  statut = statut ? statut.toString().toUpperCase() : '';
-
-  var destBruts = racine.recipients || racine.envelopeRecipients || [];
-  var champsGlobaux = racine.fields || [];
-
+  var json = this._json(reponse, 'distribute');
+  var destBruts = (json && json.recipients) || (json && json.data && json.data.recipients) || [];
   var destinataires = [];
   for (var i = 0; i < destBruts.length; i++) {
     var d = destBruts[i] || {};
-    var champs = d.fields || [];
-    if (!champs.length && champsGlobaux.length) {
-      // Certains formats rattachent les champs à l'enveloppe, pas au destinataire.
-      champs = champsGlobaux.filter(function(f) {
-        return f && (f.recipientId === d.id || f.recipientEmail === d.email);
-      });
-    }
     destinataires.push({
-      id: d.id !== undefined ? d.id : null,
-      email: d.email || '',
-      nom: d.name || '',
-      statutSignature: (d.signingStatus || d.status || '').toString().toUpperCase(),
-      champs: champs.map(function(f) { return { type: (f && f.type) ? f.type : '' }; })
+      id: (d.id === undefined || d.id === null) ? null : d.id.toString(),
+      email: (d.email || '').toString(),
+      nom: (d.name || '').toString(),
+      jeton: (d.token || '').toString(),
+      url: (d.signingUrl || '').toString(),
+      ordre: (d.signingOrder === undefined || d.signingOrder === null) ? null : d.signingOrder
     });
   }
 
-  var elemBruts = racine.envelopeItems || racine.items || racine.documents || [];
-  var elements = [];
-  for (var j = 0; j < elemBruts.length; j++) {
-    var e = elemBruts[j] || {};
-    var id = documensoPick(e, ['envelopeItemId', 'id', 'secondaryId']);
-    elements.push({
-      id: id === null ? null : id.toString(),
-      titre: (e.title || e.name || '').toString()
-    });
-  }
-
-  return { statut: statut, destinataires: destinataires, elements: elements, brut: json };
-}
-
-
-// --- 4.5 Téléchargement -----------------------------------------------------
-
-/**
- * Télécharge les documents signés d'une enveloppe finalisée, plus, si
- * disponibles, le certificat de signature et le journal d'audit.
- *
- * Le certificat et le journal sont « best effort » : leurs endpoints n'ont pas
- * pu être vérifiés contre l'OpenAPI officielle depuis cet environnement. Leur
- * absence ne fait jamais échouer la récupération des documents signés — elle
- * est remontée dans `avertissements`.
- *
- * @param {string} envelopeId
- * @return {{documents: Array<{titre, blob}>, certificat: Blob|null, journal: Blob|null, avertissements: string[]}}
- */
-DocumensoClient.prototype.downloadCompletedDocuments = function(envelopeId) {
-  var enveloppe = this.getEnvelopeStatus(envelopeId);
-  var avertissements = [];
-  var documents = [];
-
-  if (!enveloppe.elements.length) {
-    avertissements.push('Aucun document listé dans l\'enveloppe ' + envelopeId + '.');
-  }
-
-  for (var i = 0; i < enveloppe.elements.length; i++) {
-    var el = enveloppe.elements[i];
-    if (!el.id) {
-      avertissements.push('Document sans identifiant dans l\'enveloppe (position ' + (i + 1) + ').');
-      continue;
-    }
-    try {
-      documents.push({ titre: el.titre || ('Document ' + (i + 1)), blob: this._telechargerElement(el.id) });
-    } catch (e) {
-      avertissements.push('Téléchargement impossible pour « ' + (el.titre || el.id) + ' » : ' + e.message);
-    }
-  }
-
-  var certificat = null;
-  try {
-    certificat = this._telechargerPdf('certificateDownload', { envelopeId: envelopeId }, 'certificate');
-  } catch (e) {
-    avertissements.push('Certificat de signature non récupéré : ' + e.message);
-  }
-
-  var journal = null;
-  try {
-    journal = this._telechargerPdf('auditLogDownload', { envelopeId: envelopeId }, 'auditlog');
-  } catch (e) {
-    avertissements.push('Journal d\'audit non récupéré : ' + e.message);
-  }
-
-  return { documents: documents, certificat: certificat, journal: journal, avertissements: avertissements };
+  return {
+    succes: json && json.success !== undefined ? !!json.success : true,
+    envelopeId: envelopeId,
+    destinataires: destinataires,
+    brut: json
+  };
 };
 
 /**
- * Télécharge un document de l'enveloppe.
+ * URL de signature de chaque destinataire d'une enveloppe déjà distribuée.
+ *
+ * Sert de repli quand la réponse de distribution n'a pas pu être conservée
+ * (erreur après distribution, reprise d'une campagne, autre session) : l'URL
+ * est reconstruite depuis le jeton du destinataire, comme le fait Documenso.
+ *
+ * @param {string|Object} enveloppe — Identifiant, ou enveloppe déjà normalisée.
+ * @return {Object} { emailEnMinuscules: url }
+ */
+DocumensoClient.prototype.getSigningLinks = function(enveloppe) {
+  var env = (typeof enveloppe === 'string') ? this.getEnvelope(enveloppe) : enveloppe;
+  var base = documensoUrlApplication(this.baseUrl);
+  var liens = {};
+  var dest = (env && env.destinataires) || [];
+  for (var i = 0; i < dest.length; i++) {
+    if (!dest[i].jeton || !dest[i].email) continue;
+    liens[dest[i].email.toLowerCase()] = base + '/sign/' + encodeURIComponent(dest[i].jeton);
+  }
+  return liens;
+};
+
+/**
+ * URL publique de l'application Documenso, déduite de l'URL de l'API.
+ * https://app.documenso.com/api/v2 → https://app.documenso.com
+ * @param {string} baseUrl
+ * @return {string}
+ */
+function documensoUrlApplication(baseUrl) {
+  return (baseUrl || DOCUMENSO_BASE_URL_DEFAUT).toString().replace(/\/api\/v\d+\/?$/, '');
+}
+
+
+// --- 4.6 Téléchargement -----------------------------------------------------
+
+/**
+ * Télécharge UN document de l'enveloppe.
+ *
  * @param {string} envelopeItemId
+ * @param {string} [version] — 'signed' (défaut), 'original' ou 'pending'.
  * @return {Blob}
  */
-DocumensoClient.prototype._telechargerElement = function(envelopeItemId) {
-  return this._telechargerPdf('itemDownload', { envelopeItemId: envelopeItemId }, 'download');
+DocumensoClient.prototype.downloadEnvelopeItem = function(envelopeItemId, version) {
+  return this._telechargerPdf(
+    'itemDownload',
+    { envelopeItemId: envelopeItemId },
+    'download',
+    { version: version || 'signed' }
+  );
+};
+
+/**
+ * Télécharge le certificat de signature de l'enveloppe.
+ * @param {string} envelopeId
+ * @return {Blob}
+ */
+DocumensoClient.prototype.downloadCertificate = function(envelopeId) {
+  return this._telechargerPdf('certificateDownload', { envelopeId: envelopeId }, 'certificate');
+};
+
+/**
+ * Télécharge le journal d'audit de l'enveloppe.
+ * @param {string} envelopeId
+ * @return {Blob}
+ */
+DocumensoClient.prototype.downloadAuditLog = function(envelopeId) {
+  return this._telechargerPdf('auditLogDownload', { envelopeId: envelopeId }, 'auditlog');
 };
 
 /**
@@ -794,10 +1071,11 @@ DocumensoClient.prototype._telechargerElement = function(envelopeItemId) {
  * @param {string} cleEndpoint — Clé DOCUMENSO_ENDPOINTS.
  * @param {Object} params — Paramètres du chemin.
  * @param {string} stage — Étape (messages d'erreur).
+ * @param {Object} [query] — Paramètres de requête.
  * @return {Blob}
  */
-DocumensoClient.prototype._telechargerPdf = function(cleEndpoint, params, stage) {
-  var ep = this._endpoint(cleEndpoint, params);
+DocumensoClient.prototype._telechargerPdf = function(cleEndpoint, params, stage, query) {
+  var ep = this._endpoint(cleEndpoint, params, query);
   var reponse = this._fetch(ep.method, ep.url, { stage: stage, accept: 'application/pdf, application/json' });
 
   var type = (reponse.getHeaders && reponse.getHeaders()['Content-Type']) || '';
@@ -819,19 +1097,21 @@ DocumensoClient.prototype._telechargerPdf = function(cleEndpoint, params, stage)
 };
 
 
-// --- 4.6 Annulation ---------------------------------------------------------
+// --- 4.7 Annulation ---------------------------------------------------------
 
 /**
- * Annule (supprime) une enveloppe côté Documenso.
+ * Annule une enveloppe côté Documenso (les destinataires ne peuvent plus
+ * signer). L'enveloppe reste consultable — ce n'est pas une suppression.
+ *
  * @param {string} envelopeId
- * @param {string} [motif] — Motif transmis à l'API si elle l'accepte.
+ * @param {string} [motif] — Motif transmis à l'API.
  * @return {Object} Réponse brute.
  */
 DocumensoClient.prototype.cancelEnvelope = function(envelopeId, motif) {
   var corps = { envelopeId: envelopeId };
   if (motif) corps.reason = motif;
 
-  var ep = this._endpoint('envelopeDelete');
+  var ep = this._endpoint('envelopeCancel');
   var reponse = this._fetch(ep.method, ep.url, {
     payload: JSON.stringify(corps),
     contentType: 'application/json',

@@ -26,7 +26,7 @@ L'objectif est d'automatiser le cycle de vie d'un locataire :
 | `Code.gs` | Module principal : menu `onOpen`, génération bail / EDL / quittance / attestation, envois email, suivi loyers, archivage Drive |
 | `Code_Compta.gs` | Module comptabilité : onglet `Comptabilité`, import CSV banque, import amortissement, onglet `Bilan Charges` |
 | `Documenso.gs` | Client HTTP de l'API Documenso V2 (`DocumensoClient`) — transport uniquement, aucune logique métier |
-| `Signature.gs` | Signature électronique : signataires, placeholders, idempotence, onglet `Signatures`, suivi, archivage Drive, menus + wrappers `web*` du module |
+| `Signature.gs` | Signature électronique : campagnes, marqueurs internes → placeholders, copies techniques, idempotence, onglet `SignatureRequests`, suivi, archivage Drive, menus + wrappers `web*` du module |
 | `WebApp.gs` | Back-end de la web app mobile : `doGet`, lecture par ligne (`getTenantByRow`), wrappers `web*` sans `SpreadsheetApp.getUi()` |
 | `Mobile.html` | Interface mobile (PWA) servie par `doGet` — cf. §5.5ter |
 | `Compta_Form.html` | Boîte de dialogue « Ajouter une charge » (`menuAjouterCharge`) |
@@ -99,14 +99,14 @@ Une ligne par locataire. Colonnes :
 | `Compteur_Elec_Sortie` | Relevé élec à la sortie |
 | `Locataire_Nouvelle_Adresse` | Nouvelle adresse à la sortie |
 | `ID_PDF_EDL` | ID Drive du PDF d'état des lieux généré |
-| `ID_DOC_BAIL` | (réservé) |
+| `ID_DOC_BAIL` | ID du **Google Doc** de bail (écrit automatiquement par `generateLeaseDoc`). Le Doc est conservé — c'est lui que la signature électronique copie. |
 | `ID_PDF_BAIL` | ID Drive du PDF de bail généré |
 | `NOTES` | Notes libres |
 | `Dernier_Loyer` | **Formule Sheet** : loyer TTC proratisé du mois de sortie = `Loyer CC × jour(Date_Fin) / nb jours du mois`. Vide tant que `Date_Fin` est vide. Lue par `detectMontantOverride` pour la quittance du mois de sortie. Écrasable manuellement (ex: entrée+sortie le même mois). |
 | `ID_DOC_EDL` | ID du **Google Doc** EDL (écrit automatiquement par `generateEDL` via les menus/web app). Utilisé pour l'export Word envoyé à l'ami. Fallback : recherche par nom `EDL_<Nom>...` dans le dossier du locataire. |
-| `Cosignataires` | *(facultative)* Colocataires devant signer le même document. Format `NOM Prénom <email>`, séparés par `;` ou retour à la ligne. Ordre des rangs Documenso déterminé par tri sur l'email (indépendant de la saisie). |
-| `Signature_Statut` | *(facultative, lecture seule)* Miroir du statut de la dernière demande de signature. Écrite via `updateTenantCellIfExists` → silencieuse si la colonne n'existe pas. |
-| `Signature_Envelope_ID` | *(facultative, lecture seule)* Miroir de l'identifiant d'enveloppe Documenso. |
+| `bailSignatureRequestId` | *(facultative, lecture seule)* Campagne de signature du bail. Écrite via `updateTenantCellIfExists` → silencieuse si la colonne n'existe pas. |
+| `entrySignatureRequestId` | *(facultative, lecture seule)* Campagne de signature de l'EDL d'entrée. |
+| `exitSignatureRequestId` | *(facultative, lecture seule)* Campagne de signature de l'EDL de sortie. |
 
 **Sélection** : les fonctions du menu opèrent sur la **ligne active** de l'onglet `Locataires`.
 
@@ -151,9 +151,7 @@ Format : 2 colonnes (Clé / Valeur). Lu par `getConfig()`.
 | `ID_DOSSIER_DOCS_COMMUNS` | `<ID du dossier Drive des documents communs>` |
 | `ID_ATTESTATION_ASSURANCE` | `<ID du Google Doc modèle d'attestation d'assurance>` |
 | `EMAIL_AMI_EDL` | Email de l'ami qui réalise les états des lieux (destinataire du brouillon EDL Word+PDF) |
-| `Bailleur_Email` | Adresse email du bailleur — destinataire de la signature électronique `r1` (obligatoire si `SIGNATURE_BAILLEUR` = OUI) |
-| `SIGNATURE_BAILLEUR` | `OUI` (défaut) / `NON` — le bailleur signe-t-il électroniquement ? Détermine la convention des rangs (cf. §5.8) |
-| `SIGNATURE_ORDRE_SEQUENTIEL` | `OUI` = signature chacun son tour (r1 puis r2…) ; vide/`NON` = tous en parallèle (défaut) |
+| `Bailleur_Email` | Adresse email du bailleur — destinataire `r1` de la signature électronique (**obligatoire** pour signer) |
 
 > ⚠️ Le **token API Documenso** n'est **jamais** dans l'onglet `Config` : il vit dans
 > `PropertiesService.getScriptProperties()` sous la clé `DOCUMENSO_API_TOKEN` (cf.
@@ -320,29 +318,36 @@ rangé dans `LOCATAIRES/_Justificatifs/<année>/<MM>/` (`getOrCreateJustifFolder
 
 ---
 
-### 3.8 Onglet `Signatures` (créé automatiquement par `getOrCreateSignatureSheet()`)
+### 3.8 Onglet `SignatureRequests` (créé automatiquement par `getOrCreateSignatureSheet()`)
 
-Une ligne par demande de signature électronique. Colonnes (`SIGNATURE_HEADERS`) :
+Une ligne par **campagne** de signature. Colonnes (`SIGNATURE_HEADERS`) :
 
-| Colonne | Modèle de données demandé | Contenu |
-|---|---|---|
-| `Date_Creation` | — | Horodatage de la création de la demande |
-| `Ligne` / `Locataire_Nom` / `Chambre` | — | Rattachement au locataire |
-| `Documents` | `signatureDocumentTypes` | `BAIL`, `EDL` ou `BAIL+EDL` |
-| `External_ID` | `documensoExternalId` | Identifiant externe déterministe (cf. §5.9) |
-| `Envelope_ID` | `documensoEnvelopeId` | Identifiant Documenso |
-| `Statut` | `signatureStatus` | Cf. statuts ci-dessous |
-| `Demande_Le` | `signatureRequestedAt` | Distribution effective |
-| `Termine_Le` | `signatureCompletedAt` | Finalisation (signé / refusé / annulé) |
-| `Signataires` | `signatureRecipients` | `r1=… ; r2=…` |
-| `Fichiers_Signes` | `signedFiles` | Noms des PDF archivés dans Drive |
-| `Derniere_Erreur` | `lastSignatureError` | Dernier échec (emails masqués, jamais de token) |
-| `Lien` | — | Lien de suivi Documenso |
+| Colonne | Contenu |
+|---|---|
+| `signatureRequestId` | Identifiant interne lisible, ex. `SR-BAIL-L2-dupont-marie-20260831-1` |
+| `externalId` | Identifiant déterministe transmis à Documenso (cf. §5.9) |
+| `dossierId` / `tenantRow` / `locationId` | Rattachement au dossier, à la ligne du Sheet et au logement |
+| `campaignType` | `BAIL` / `EDL_ENTREE` / `EDL_SORTIE` / `BAIL_ET_EDL_ENTREE` |
+| `etatDesLieuxType` | `ENTREE`, `SORTIE`, ou vide |
+| `sourceDocumentIds` / `sourceRevisionIds` | Google Docs de travail copiés + date de dernière modification |
+| `unsignedPdfFileIds` / `unsignedPdfHashes` | PDF envoyés à Documenso + empreinte SHA-256 |
+| `documensoEnvelopeId` | Identifiant de l'enveloppe |
+| `bailleurRecipientId` / `locataireRecipientId` | Identifiants Documenso des destinataires |
+| `bailleurEmail` / `locataireEmail` | Adresses au moment de l'envoi |
+| `status` | Cf. statuts ci-dessous |
+| `bailleurSigningUrl` | Lien « Signer maintenant » du bailleur |
+| `bailleurSignedAt` / `locataireSignedAt` / `completedAt` | Horodatages |
+| `signedPdfFileIds` | PDF signés archivés, par document (`BAIL=… ; EDL=…`) |
+| `auditMetadataFileId` | Certificat de signature / journal d'audit |
+| `lastErrorCode` / `lastErrorMessage` | Dernier échec (emails masqués, **jamais** de token) |
+| `createdAt` / `updatedAt` | Horodatages de la ligne |
 
-**Statuts** (`SIGNATURE_STATUTS`) : `NON_ENVOYE`, `PREPARATION`, `EN_ATTENTE_SIGNATURE`,
-`PARTIELLEMENT_SIGNE`, `SIGNE`, `REFUSE`, `ANNULE`, `ERREUR`.
-`SIGNE` / `REFUSE` / `ANNULE` sont **terminaux** (`SIGNATURE_STATUTS_FINAUX`) → plus interrogés
-par le suivi horaire.
+**Statuts** (`SIGNATURE_STATUTS`) : `DRAFT`, `PREPARING`, `AWAITING_BAILLEUR`,
+`AWAITING_LOCATAIRE`, `COMPLETED`, `REJECTED`, `CANCELLED`, `ERROR`.
+`COMPLETED` / `REJECTED` / `CANCELLED` sont **terminaux** (`SIGNATURE_STATUTS_FINAUX`) → plus
+interrogés par le suivi horaire. `COMPLETED` n'est posé qu'**après** archivage de tous les PDF
+signés : un archivage partiel laisse la campagne en `ERROR` (code `ARCHIVAGE_PARTIEL`), et
+l'actualisation suivante reprend où elle s'était arrêtée.
 
 ---
 
@@ -460,15 +465,22 @@ Quatre cartes, ordonnées par fréquence d'usage. **Chaque action porte son prop
 2. **Quittance — autre mois** (rattrapage) : sélecteur `#q-tenant` (**actifs uniquement**, aligné sur le garde-fou `isTenantParti` de `webGenererQuittance`) + badges `Email` / `Quittance <mois cible>` + `#mois` / `#annee` → `genQuittanceMoisChoisi()` → PDF + **brouillon** Gmail.
 3. **Nouveau locataire** : bloc « avant la ligne dans le Sheet » (email libre → `webDemandePiecesLibre`), puis sélecteur `#tenant-onboard` (tous locataires) + badges et 4 étapes numérotées — 1 pièces, 2 bail + EDL, 3 dossier, 4 **attestation d'assurance** (`webEnvoyerAttestationAssurance`) — suivies de la ligne de régénération Bail / EDL.
 
-4. **Signature électronique** : sélecteur `#sig-tenant` (tous locataires) + badges `PDF bail` /
-   `PDF EDL` / `Email`, sélecteur `#sig-jeu` (Bail / EDL / Bail + EDL), case **Mode test
-   (DRY_RUN)**, bouton « 🔍 Vérifier et récapituler » (`webPreparerSignature`, sans effet de bord)
-   puis bouton d'envoi **désactivé tant que la vérification n'est pas passée** (`SIG_PRET`), et
-   « 🔄 Actualiser les statuts ». Le récapitulatif affiche logement, documents, signataires, emails,
-   ordre de signature, identifiant externe et historique.
+4. **Signature électronique** : sélecteur `#sig-tenant` (tous locataires) + badges
+   `Bail généré` / `EDL généré` / `Email`, puis **trois lignes d'état** (`webGetSignatureEtat` →
+   `etatSignatureLocataire`) — Bail, État des lieux d'entrée, État des lieux de sortie. Chaque ligne
+   affiche sa pastille de statut, les dates de signature, l'enveloppe, et un **bouton principal
+   adapté à l'état** : « Envoyer en signature » → « Signer maintenant » (ouvre l'URL Documenso du
+   bailleur) → « En attente du locataire — Actualiser » → « Télécharger le document signé » ;
+   « Reprendre la campagne » en cas d'erreur, plus « Annuler » tant que la campagne n'est pas
+   terminale. Une action « Envoyer bail + EDL d'entrée » couvre la campagne à deux documents. Une
+   case **Mode test (DRY_RUN)**, et « 🔄 Actualiser les statuts » (limité au locataire sélectionné).
+   Tout clic d'envoi passe d'abord par `webPreparerSignature` (sans effet de bord), qui affiche le
+   récapitulatif — logement, locataire et son email, bailleur et son email, documents, type d'état
+   des lieux, ordre des signatures, emplacement Drive prévu, demande existante — et n'active le
+   bouton de confirmation qu'ensuite (`SIG_PRET`).
    ⚠️ `setLoading(false)` réactive **tous** les boutons : `syncSignatureUI()` réapplique l'état réel
-   du bouton d'envoi après chaque action, et `sigConfirmer()` re-vérifie `SIG_PRET` côté client
-   (le serveur re-fait de toute façon `preflightSignature`).
+   du bouton de confirmation après chaque action, et `sigConfirmer()` re-vérifie `SIG_PRET` côté
+   client (le serveur re-fait de toute façon `preflightSignature`).
 
 Supprimé de l'UI : l'ancien sélecteur global « Colocataire actif », la carte fourre-tout « Autres », et le bouton « Réparer le suivi des loyers » (le suivi ne se consulte pas dans la web app → action réservée au menu Sheet `menuReparerSuiviLoyers` ; le wrapper `webReparerSuiviLoyers` reste disponible).
 
@@ -491,51 +503,88 @@ Supprimé de l'UI : l'ancien sélecteur global « Colocataire actif », la carte
 
 Documentation complète : [`docs/documenso.md`](docs/documenso.md). Résumé de la logique :
 
-1. **Marqueur interne, placeholders générés.** Les modèles Docs contiennent un unique marqueur
-   `[[SIGNATURES_DOCUMENSO]]` (constante `SIGNATURE_MARQUEUR`), jamais de placeholders figés.
-   `insererBlocSignatures` le remplace par un bloc adapté au **nombre réel de signataires** —
-   `{{name, rN}}` / `{{signature, rN}}` / `{{date, rN}}`, **un par ligne**, en Arial 11 noir — puis
-   supprime le marqueur. Le marqueur doit être un **paragraphe autonome hors tableau** (sinon
-   `removeChild` emporterait le tableau : le cas est refusé explicitement, dès le récapitulatif).
-2. **Convention des rangs** (`resoudreSignataires`) : `SIGNATURE_BAILLEUR = OUI` → r1 bailleur,
-   r2 locataire, r3+ colocataires ; `NON` → r1 locataire, r2+ colocataires. L'ordre du tableau de
-   destinataires envoyé à l'API **est** l'ordre des rangs.
-3. **Copie prête à signer.** `preparerPdfSignature` duplique le modèle, réutilise
-   `applyBailReplacements` / `applyEdlReplacements` (extraits de `generateLeaseDoc` / `generateEDL`),
-   **neutralise les variables résiduelles** (`neutraliserVariablesResiduelles` — indispensable pour
-   les balises de sortie en blanc de l'EDL), insère le bloc, **valide** (`validerPlaceholders`),
-   exporte le PDF puis supprime la copie Docs. Le modèle source n'est jamais modifié.
-4. **Envoi** (`envoyerDemandeSignature`) : pré-contrôles → PDF → trace dans `Signatures` **avant**
-   tout appel réseau → `createEnvelope` → `validateDetectedFields` → `distributeEnvelope`.
-   Bail + EDL = **une seule enveloppe** (2 fichiers), donc un seul document décompté du quota.
-5. **Suivi** : `triggerSuiviSignatures` (horaire, installé par `installerTriggerSignatures`) ou
-   `actualiserStatutsSignature()` à la demande. Sur `COMPLETED` → téléchargement + archivage, une
-   seule fois (idempotent via `Fichiers_Signes`).
-6. **DRY_RUN** : génère les PDF (`_DRYRUN`), résout les signataires, construit le payload,
-   **n'appelle pas l'API et n'écrit pas dans `Signatures`**. Fonctionne sans token.
+1. **Quatre campagnes** (`SIGNATURE_CAMPAGNES`) : `BAIL`, `EDL_ENTREE`, `EDL_SORTIE`,
+   `BAIL_ET_EDL_ENTREE`. Le type d'état des lieux est **toujours demandé**, jamais déduit ;
+   « bail + état des lieux » désigne toujours l'EDL d'**entrée** — la combinaison bail + EDL de
+   sortie est refusée explicitement par `chargerContexteSignature`.
+2. **Marqueurs internes nommés, dans les cellules de signature.** Les modèles Docs portent huit
+   marqueurs `[[SIGNATURE_BAILLEUR_BAIL]]`, `[[DATE_LOCATAIRE_ENTREE]]`… (`SIGNATURE_MARQUEURS`).
+   Leur syntaxe `[[...]]` est **ignorée par le moteur de macros** — contrairement à `{{...}}`, qui
+   serait effacé. `injecterPlaceholdersDocumenso` convertit le bloc actif en `{{signature,rN}}` /
+   `{{date,rN}}` et **efface le bloc inactif**, dans la copie technique uniquement.
+3. **Le PDF part du Google Doc DE TRAVAIL, pas du modèle.** `preparerPdfNonSigne` copie
+   `ID_DOC_BAIL` / `ID_DOC_EDL` — le document réellement transmis au locataire, et pour l'EDL celui
+   que l'utilisateur complète à la sortie. Aucun remplacement de variable n'est rejoué : le contenu
+   saisi à la main est donc conservé. Copie → injection → validation → export PDF `…_NON_SIGNE.pdf`
+   → empreinte SHA-256 → copie technique à la corbeille (**conservée en cas d'échec**, pour
+   diagnostic).
+4. **Rangs et ordre** (`resoudreSignataires`) : r1 = bailleur (`Bailleur_Email`), r2 = locataire.
+   `signingOrder` 1 puis 2, enveloppe en `meta.signingOrder = SEQUENTIAL` : Documenso ne sollicite
+   le locataire qu'une fois le bailleur passé. L'URL de signature du bailleur, renvoyée par
+   `distributeEnvelope`, alimente le bouton « Signer maintenant » — le système ne signe **jamais**
+   à la place du bailleur.
+5. **Envoi** (`envoyerDemandeSignature`) : pré-contrôles → verrou `LockService` → PDF → contrôle
+   d'idempotence → trace dans `SignatureRequests` **avant** tout appel réseau → `createEnvelope`
+   (brouillon) → `getEnvelope` → `validateDetectedFields` → `distributeEnvelope`.
+   Bail + EDL = **une seule enveloppe** (2 fichiers, champ multipart `files[]`), donc un seul
+   document décompté du quota.
+6. **Validation des champs avant distribution** : 4 champs par document (signature + date, pour r1
+   et r2), contrôlés **par `envelopeItem`** et par destinataire. Un placeholder non détecté, un
+   compte incorrect, un champ mal attribué ou un document absent laissent l'enveloppe **en
+   brouillon** — aucun email n'est parti.
+7. **Suivi** : `triggerSuiviSignatures` (horaire, installé par `installerTriggerSignatures`) ou
+   `actualiserStatutsSignature()` à la demande, idempotent. Sur enveloppe `COMPLETED` →
+   téléchargement (`?version=signed`) de **tous** les `envelopeItems` + archivage ; le statut ne
+   passe à `COMPLETED` qu'ensuite.
+8. **DRY_RUN** : génère les PDF, calcule les empreintes, résout les signataires, construit le
+   payload et valide les marqueurs, **sans appeler l'API ni écrire dans `SignatureRequests`**.
+   Fonctionne sans token.
 
-### 5.9 Idempotence — identifiant externe
+### 5.8bis Cycle de vie de l'EDL — entrée puis sortie
 
-`construireExternalId` produit `GL-<locationId>-<documentSet>-<revision>`, ex.
-`GL-ch2-dupont-marie-BAIL_EDL-e03a8053` :
+L'état des lieux est **un seul Google Doc de travail** (`ID_DOC_EDL`), utilisé deux fois :
 
-- `locationId` = `ch<chambre>-<slug(Locataire_Nom)>`
-- `documentSet` = `BAIL` | `EDL` | `BAIL_EDL`
-- `revision` = empreinte MD5 (8 hex) des données qui composent les documents (identité, dates,
-  compteurs, montants, bailleur, adresse, emails des signataires dans l'ordre des rangs)
+- **entrée** : copie technique → marqueurs `ENTREE` activés, marqueurs `SORTIE` effacés → PDF
+  d'entrée signé, archivé `…_EDL_ENTREE_<NOM>_SIGNE.pdf` ;
+- **sortie** : l'utilisateur complète **le même Doc** (états, commentaires, relevés, clés) → nouvelle
+  copie technique → marqueurs `SORTIE` activés, `ENTREE` effacés → **nouveau** PDF contenant les
+  données d'entrée *et* de sortie, archivé `…_EDL_SORTIE_<NOM>_SIGNE.pdf`.
 
-Avant chaque envoi, `preflightSignature` refuse une demande dont l'identifiant existe déjà avec un
-statut `PREPARATION` / `EN_ATTENTE_SIGNATURE` / `PARTIELLEMENT_SIGNE` / `SIGNE`, **ou** `ERREUR`
-avec un `Envelope_ID` renseigné (une enveloppe existe côté Documenso → il faut l'annuler d'abord).
-Une reprise légitime réutilise la même base avec un suffixe `-t2`, `-t3`…
+Garanties (couvertes par les tests) : le PDF d'entrée signé n'est jamais écrasé ; le Doc de travail
+reste modifiable et garde ses marqueurs ; aucun placeholder Documenso n'y est jamais écrit ; les
+deux campagnes ont des statuts, enveloppes et fichiers indépendants.
+
+### 5.9 Idempotence — trois garde-fous
+
+1. **Verrou de script** (`LockService`) sur tout l'envoi : deux clics rapprochés ne peuvent pas
+   produire deux enveloppes.
+2. **Pré-contrôle** : une campagne en cours (ou déjà signée) pour les mêmes documents bloque la
+   création d'une nouvelle et propose de reprendre son suivi.
+3. **Identifiant externe déterministe**, calculé après génération des PDF :
+   `construireExternalId` produit `GL-<SHA-256 tronqué à 32 hex>` sur
+   `dossierId + locationId + campaignType + etatDesLieuxType + empreintes SHA-256 des PDF +
+   email bailleur + email locataire`.
+
+Le même contenu envoyé aux mêmes personnes produit le même identifiant : le doublon est détecté
+**avant** l'appel API, et les PDF fraîchement générés sont mis à la corbeille. Une campagne
+`REJECTED` ou `CANCELLED` ne peut être relancée qu'avec `confirmerReprise: true`.
 
 ### 5.10 Archivage des documents signés
 
 Dans `LOCATAIRES/<Locataire_Nom>/Signature/`, noms déterministes :
-`<yyyy-MM-dd>_<Bail|Etat-des-lieux-entree>_<NOM>_<Original|Signe>.pdf`,
-`<yyyy-MM-dd>_Certificat-signature_<NOM>.pdf`, `<yyyy-MM-dd>_Journal-signature_<NOM>.pdf`.
-Le PDF original envoyé à la signature est conservé ; le certificat et le journal sont « best
-effort » (leur absence n'empêche ni le passage à `SIGNE` ni l'archivage des documents signés).
+
+```
+<yyyy-MM-dd>_<Bail|EDL_ENTREE|EDL_SORTIE>_<NOM>_<NON_SIGNE|SIGNE>.pdf
+<yyyy-MM-dd>_Certificat-signature_<NOM>.pdf
+<yyyy-MM-dd>_Journal-audit_<NOM>.pdf
+```
+
+Le PDF non signé exactement envoyé à Documenso est conservé. **Tous** les `envelopeItems` sont
+parcourus (jamais seulement le premier) ; chaque fichier écrit est relu pour confirmer sa création,
+et un document déjà archivé n'est pas re-téléchargé. Le certificat et le journal sont « best
+effort ». Un archivage incomplet laisse la campagne en `ERROR` / `ARCHIVAGE_PARTIEL` : elle ne passe
+`COMPLETED` qu'une fois tous les fichiers en place. Les copies techniques vivent dans
+`Signature/_Technique/`.
 
 ---
 
@@ -578,32 +627,41 @@ effort » (leur absence n'empêche ni le passage à `SIGNE` ni l'archivage des d
 | `triggerArchivageMensuel()` / `installerTriggerArchivage()` | Trigger mensuel d'archivage (le 1er vers 6h) |
 | `webEnvoyerQuittanceDirecte(row)` | Quittance mois courant + suivi + envoi direct (bouton 1 clic) |
 | `statutValueIsActif(v)` | (WebApp) booléen actif depuis la valeur brute colonne A |
-| `applyBailReplacements(body, tenant, config, chambre)` | Remplacements du bail — extrait de `generateLeaseDoc`, partagé avec la copie « prête à signer » |
-| `applyEdlReplacements(body, tenant, config)` | Suppression des autres chambres + remplacements EDL — extrait de `generateEDL` |
 
 ### 6bis. Signature électronique (`Documenso.gs` / `Signature.gs`)
 
 | Fonction | Rôle |
 |---|---|
-| `DocumensoClient` | Client API V2 : `createEnvelope`, `addOrMapRecipients`, `validateDetectedFields`, `distributeEnvelope`, `getEnvelopeStatus`, `downloadCompletedDocuments`, `cancelEnvelope` |
+| `DocumensoClient` | Client API V2 : `createEnvelope`, `getEnvelope`, `mapRecipients`, `validateDetectedFields`, `distributeEnvelope`, `getSigningLinks`, `getEnvelopeStatus`, `downloadEnvelopeItem`, `downloadCertificate`, `downloadAuditLog`, `cancelEnvelope` |
 | `DocumensoError` | Erreur typée : `code`, `httpStatus`, `stage`, `envelopeId`, `safeToRetry` |
 | `documensoToken()` / `documensoTokenConfigure()` | Lecture du token (propriétés de script) — jamais journalisé |
 | `documensoMaskEmail()` / `documensoExtraitSur()` | Masquage des données personnelles dans les logs et messages |
-| `documensoBuildMultipart(parts)` | Corps `multipart/form-data` à plusieurs fichiers (UrlFetchApp ne sait pas envoyer deux champs `files`) |
-| `resoudreSignataires(tenant, config)` | Liste ordonnée des signataires → rangs r1, r2, … |
-| `parseCosignataires(brut)` | Analyse de la colonne `Cosignataires`, ordre déterministe (tri email) |
-| `construireExternalId(...)` | Identifiant externe déterministe (cf. §5.9) |
-| `insererBlocSignatures(body, signataires)` | Remplace `[[SIGNATURES_DOCUMENSO]]` par les placeholders |
-| `neutraliserVariablesResiduelles(body)` | Retire les `{{...}}` non remplacés avant l'ajout des placeholders |
-| `validerPlaceholders(texte, signataires)` | Présence, unicité, rangs cohérents, aucun placeholder coupé |
-| `preparerPdfSignature(...)` | Copie du modèle → remplacements → bloc → validation → PDF |
+| `documensoExpurgerSecrets()` | Retire tout ce qui ressemble à un token ou à un en-tête `Authorization` |
+| `documensoBuildMultipart(parts)` | Corps `multipart/form-data` à plusieurs fichiers (UrlFetchApp ne sait pas répéter le champ `files[]`) |
+| `documensoNormaliserEnveloppe(json)` | Enveloppe normalisée : statut, destinataires, champs, `envelopeItems` |
+| `documensoValiderChamps(enveloppe, signataires, attendus)` | Vérification **pure** des champs détectés, par `envelopeItem` × destinataire × type |
+| `resoudreSignataires(tenant, config)` | r1 = bailleur, r2 = locataire, `signingOrder` 1 puis 2 |
+| `signatureBlocActif(typeDoc, edlType)` | Bloc de marqueurs à activer (`BAIL`, `EDL_ENTREE`, `EDL_SORTIE`) |
+| `injecterPlaceholdersDocumenso(body, typeDoc, edlType)` | Marqueurs actifs → placeholders, marqueurs inactifs → chaîne vide |
+| `validerCopieTechnique(texte)` | 4 placeholders attendus, aucun marqueur restant, aucun placeholder coupé |
+| `resoudreDocSource(typeDoc, tenant, config)` | Google Doc **de travail** à copier (`ID_DOC_BAIL` / `ID_DOC_EDL`) |
+| `preparerPdfNonSigne(...)` | Copie technique → injection → validation → PDF `…_NON_SIGNE.pdf` → SHA-256 |
+| `construireExternalId(elements)` | Identifiant déterministe SHA-256 (cf. §5.9) |
+| `construireSignatureRequestId(...)` | Identifiant interne lisible et unique par construction |
+| `chargerContexteSignature(row, campaignType)` | Contexte de campagne ; refuse bail + EDL de sortie |
+| `attendusPourCampagne(ctx)` | Documents et champs attendus, pour la validation avant distribution |
 | `preflightSignature(ctx, options)` | Récapitulatif + blocages, sans effet de bord ni appel API |
-| `envoyerDemandeSignature(row, jeu, options)` | Orchestration complète de l'envoi (ou du DRY_RUN) |
-| `actualiserStatutsSignature()` | Suivi : statuts, téléchargement et archivage des documents finalisés |
-| `archiverDocumentsSignes(...)` | Écriture Drive des PDF signés + certificat + journal d'audit |
-| `annulerDemandeSignature(externalId, motif)` | Annulation côté Documenso + mise à jour du suivi |
-| `triggerSuiviSignatures()` / `installerTriggerSignatures()` | Déclencheur horaire de suivi |
-| `webGetSignatureMeta()` / `webPreparerSignature(row, jeu)` / `webEnvoyerSignature(row, jeu, dryRun)` / `webActualiserStatutsSignature()` / `webGetSignaturesLocataire(row)` / `webAnnulerSignature(...)` | Wrappers web app |
+| `verifierMarqueursDocument(...)` | Présence des marqueurs dans le Doc de travail, sans le modifier |
+| `envoyerDemandeSignature(row, campaignType, options)` | Orchestration complète (ou DRY_RUN), sous verrou |
+| `signatureAcquerirVerrou(dryRun)` | Verrou `LockService` anti-double-envoi |
+| `actualiserStatutsSignature(deps)` | Suivi : statuts, téléchargement et archivage — idempotent |
+| `mapStatutDocumenso(enveloppe, demande)` | État Documenso → statut métier + dates de signature |
+| `archiverDocumentsSignes(...)` | Écriture Drive de **tous** les PDF signés + certificat + journal |
+| `signatureTypeDocumentPourElement(...)` | Appariement `envelopeItem` ↔ document, par titre puis par ordre |
+| `annulerDemandeSignature(signatureRequestId, motif)` | `POST /envelope/cancel` + mise à jour du suivi |
+| `etatSignatureLocataire(row)` | Trois lignes d'état (bail, EDL entrée, EDL sortie) + action principale |
+| `triggerSuiviSignatures()` / `installerTriggerSignatures()` / `signatureTriggerInstalle()` | Déclencheur horaire de suivi |
+| `webGetSignatureMeta()` / `webGetSignatureEtat(row)` / `webPreparerSignature(row, campaignType)` / `webEnvoyerSignature(...)` / `webActualiserStatutsSignature(row)` / `webGetSigningUrlBailleur(id)` / `webAnnulerSignature(...)` | Wrappers web app |
 | `menuEnvoyerEnSignature()` / `menuActualiserStatutsSignature()` / `menuAnnulerSignature()` | Entrées de menu |
 
 ---
@@ -615,21 +673,28 @@ effort » (leur absence n'empêche ni le passage à `SIGNE` ni l'archivage des d
 3. **Templates Docs** : les variables sont au format `{{Nom_Variable}}` exactement (sensible à la casse et aux underscores).
 4. **EDL** : la suppression des sections d'autres chambres dépend du marqueur littéral `CHAMBRE N°1/2/3` dans le doc + d'un délimiteur de section suivant (titre numéroté `4. ...`). Si le template change, vérifier `removeOtherRoomSections` et `findNextRoomSectionEnd`.
 5. **Quittance — premier/dernier loyer** : détection sur `mois/année === Date_Début` (premier) ou `=== Date_Fin` (dernier, prioritaire). `1er_Loyer` et `Dernier_Loyer` sont en TTC (charges incluses). `Dernier_Loyer` est une **formule** dans le Sheet (prorata jours réels) — si entrée et sortie tombent le même mois, écraser la formule manuellement sur la ligne.
-6. **Drive** : les fichiers Google Docs intermédiaires (bail, quittance) sont **mis à la corbeille** une fois le PDF créé. Pour l'EDL, le doc Google **reste**.
+6. **Drive** : le Google Doc intermédiaire de la **quittance** est mis à la corbeille une fois le PDF créé. Ceux du **bail** (`ID_DOC_BAIL`) et de l'**EDL** (`ID_DOC_EDL`) sont **conservés** : ce sont les documents de travail que la signature électronique copie. Les copies techniques de signature vivent dans `Signature/_Technique/` et sont jetées après export réussi (conservées en cas d'échec, pour diagnostic).
 7. **Colonne A `Actif`** : case à cocher booléenne. Cochée = actif, décochée = inactif/parti. Helpers `isTenantActif` / `isTenantParti` lisent la valeur de façon flexible (booléen OU ancien texte « Parti »). Un colocataire inactif bloque la génération de quittances. **Les macros n'écrivent jamais cette colonne** — elle se gère manuellement dans le Sheet (case à cocher colonne A).
 8. **Emails** : `createDraft` pour les emails à fort enjeu (dossier, demande de pièces) → relecture manuelle. `sendEmail` pour les quittances → envoi direct.
 9. **Signature électronique** : automatisée via **Documenso** (`Signature.gs`, cf. §5.8 et
    [`docs/documenso.md`](docs/documenso.md)). Le template email `ENVOI_DOCUMENTS` mentionne encore
    « Yousign » — à mettre à jour dans l'onglet `Templates` du Sheet (contenu non versionné).
-10. **Modèles Docs et signature** : le marqueur `[[SIGNATURES_DOCUMENSO]]` doit être ajouté à la
-    main dans les modèles de bail et d'EDL (ils vivent sur Drive, pas dans le repo). Sans lui,
-    l'envoi en signature est bloqué avec un message explicite. Guide : `docs/documenso.md` §2.
+10. **Modèles Docs et signature** : les huit marqueurs internes (`[[SIGNATURE_BAILLEUR_BAIL]]`,
+    `[[DATE_LOCATAIRE_SORTIE]]`…) doivent être ajoutés **à la main** dans les cellules de signature
+    des modèles de bail et d'EDL — ils vivent sur Drive, pas dans le repo. Leur syntaxe `[[...]]`
+    est délibérée : une balise `{{...}}` serait effacée par le moteur de macros avant d'atteindre
+    Documenso. Sans eux, l'envoi est bloqué avec un message nommant le marqueur absent. Procédure
+    exacte et règles de mise en forme : `docs/documenso.md` §2.
 11. **Token Documenso** : uniquement dans `PropertiesService.getScriptProperties()`
     (`DOCUMENSO_API_TOKEN`). Jamais dans une cellule, un fichier versionné ou un log. `npm run lint`
     échoue si un token `api_…` apparaît dans un fichier du dépôt.
 12. **Tests hors ligne** : `npm test` charge les vrais `.gs` dans un contexte `vm` avec des stubs
     Apps Script (`tests/`). L'API Documenso est mockée — aucun test ne peut déclencher une vraie
-    signature. `.claspignore` empêche `clasp push` d'envoyer `tests/` dans le projet Apps Script.
+    signature ni envoyer un email. `.claspignore` empêche `clasp push` d'envoyer `tests/` dans le
+    projet Apps Script.
+13. **Déclencheur de suivi** : `installerTriggerSignatures()` est à exécuter **une fois** depuis
+    l'éditeur Apps Script. Sans lui, les statuts ne se mettent à jour que sur clic manuel
+    (« 🔄 Actualiser les statuts ») — la web app le signale dans l'en-tête de la section signature.
 
 ---
 

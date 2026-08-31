@@ -32,14 +32,19 @@ const EN_TETES_LOCATAIRES = [
   'Locataire_Adresse', 'Chambre', 'Date_Début', 'Date_Fin', '1er_Loyer', 'Assurance',
   'Compteur_Eau', 'Compteur_Elec', 'Compteur_Eau_Sortie', 'Compteur_Elec_Sortie',
   'Locataire_Nouvelle_Adresse', 'ID_PDF_EDL', 'ID_DOC_BAIL', 'ID_PDF_BAIL', 'NOTES',
-  'Dernier_Loyer', 'ID_DOC_EDL', 'Cosignataires', 'Signature_Statut', 'Signature_Envelope_ID'
+  'Dernier_Loyer', 'ID_DOC_EDL',
+  'bailSignatureRequestId', 'entrySignatureRequestId', 'exitSignatureRequestId'
 ];
 
 const EN_TETES_CHAMBRES = [
   'ID Chambre', 'Surface', 'Loyer HC', 'Charges', 'Loyer CC', 'Caution', 'Description des meubles'
 ];
 
-/** Modèle de bail : n'utilise que des variables gérées par buildReplacements. */
+/**
+ * Modèle de bail : variables {{...}} gérées par buildReplacements, plus les
+ * marqueurs internes du bloc de signature (dans les cellules du tableau de
+ * signature du vrai modèle — ici de simples paragraphes).
+ */
 const TEMPLATE_BAIL = [
   'CONTRAT DE LOCATION MEUBLÉE',
   'Bailleur : {{Bailleur_Nom}} — {{Bailleur_Adresse}}',
@@ -48,10 +53,17 @@ const TEMPLATE_BAIL = [
   'Loyer : {{Loyer_HC}} + charges {{Charges}} = {{Loyer_CC}}',
   'Dépôt de garantie : {{Caution}}',
   'Durée : à compter du {{Date_Début}}',
-  '[[SIGNATURES_DOCUMENSO]]'
+  'SIGNATURES',
+  'Le bailleur : [[SIGNATURE_BAILLEUR_BAIL]]',
+  'Le [[DATE_BAILLEUR_BAIL]]',
+  'Le locataire : [[SIGNATURE_LOCATAIRE_BAIL]]',
+  'Le [[DATE_LOCATAIRE_BAIL]]'
 ];
 
-/** Modèle d'EDL : contient les balises de sortie, laissées en blanc à l'entrée. */
+/**
+ * Modèle d'EDL : un seul document pour l'entrée ET la sortie, avec les deux
+ * blocs de signature. Les balises de sortie restent en blanc à l'entrée.
+ */
 const TEMPLATE_EDL = [
   'ÉTAT DES LIEUX CONTRADICTOIRE',
   'Bailleur : {{Bailleur_Nom}} — {{Bailleur_Adresse}}',
@@ -67,8 +79,74 @@ const TEMPLATE_EDL = [
   'Mobilier chambre 3',
   '4. État des parties communes',
   'Cuisine, salon, salle de bain',
-  '[[SIGNATURES_DOCUMENSO]]'
+  'SIGNATURES — POUR L\'ENTRÉE',
+  'Le bailleur : [[SIGNATURE_BAILLEUR_ENTREE]]',
+  'Le [[DATE_BAILLEUR_ENTREE]]',
+  'Le locataire : [[SIGNATURE_LOCATAIRE_ENTREE]]',
+  'Le [[DATE_LOCATAIRE_ENTREE]]',
+  'SIGNATURES — POUR LA SORTIE',
+  'Le bailleur : [[SIGNATURE_BAILLEUR_SORTIE]]',
+  'Le [[DATE_BAILLEUR_SORTIE]]',
+  'Le locataire : [[SIGNATURE_LOCATAIRE_SORTIE]]',
+  'Le [[DATE_LOCATAIRE_SORTIE]]'
 ];
+
+/**
+ * Google Doc de travail du bail, tel que generateLeaseDoc le laisse : toutes
+ * les variables remplacées, marqueurs internes intacts.
+ */
+const DOC_BAIL_TRAVAIL = [
+  'CONTRAT DE LOCATION MEUBLÉE',
+  'Bailleur : Jean MARTIN — 1 rue des Tests, 33000 Bordeaux',
+  'Locataire : DUPONT Marie, né(e) le 12/05/1998 à Bordeaux',
+  'Logement : 12 avenue du Lac, 33000 Bordeaux — chambre n°2',
+  'Loyer : 460,00 € + charges 100,00 € = 560,00 €',
+  'Dépôt de garantie : 460,00 €',
+  'Durée : à compter du 01/09/2026',
+  'SIGNATURES',
+  'Le bailleur : [[SIGNATURE_BAILLEUR_BAIL]]',
+  'Le [[DATE_BAILLEUR_BAIL]]',
+  'Le locataire : [[SIGNATURE_LOCATAIRE_BAIL]]',
+  'Le [[DATE_LOCATAIRE_BAIL]]'
+];
+
+/**
+ * Google Doc de travail de l'EDL après l'entrée : chambres 1 et 3 retirées,
+ * relevés d'entrée saisis, colonnes de sortie encore vides. C'est CE document
+ * que l'utilisateur complète plus tard pour la sortie.
+ */
+const DOC_EDL_TRAVAIL = [
+  'ÉTAT DES LIEUX CONTRADICTOIRE',
+  'Bailleur : Jean MARTIN — 1 rue des Tests, 33000 Bordeaux',
+  'Locataire : DUPONT Marie — nouvelle adresse :',
+  'Compteur eau : 123 / sortie',
+  'Compteur élec : 4567 / sortie',
+  '3. État des parties privatives',
+  'CHAMBRE N°2',
+  'Mobilier chambre 2 — état : BE',
+  '4. État des parties communes',
+  'Cuisine, salon, salle de bain — état : TB',
+  'SIGNATURES — POUR L\'ENTRÉE',
+  'Le bailleur : [[SIGNATURE_BAILLEUR_ENTREE]]',
+  'Le [[DATE_BAILLEUR_ENTREE]]',
+  'Le locataire : [[SIGNATURE_LOCATAIRE_ENTREE]]',
+  'Le [[DATE_LOCATAIRE_ENTREE]]',
+  'SIGNATURES — POUR LA SORTIE',
+  'Le bailleur : [[SIGNATURE_BAILLEUR_SORTIE]]',
+  'Le [[DATE_BAILLEUR_SORTIE]]',
+  'Le locataire : [[SIGNATURE_LOCATAIRE_SORTIE]]',
+  'Le [[DATE_LOCATAIRE_SORTIE]]'
+];
+
+/**
+ * Le même Doc de travail, complété par l'utilisateur pour la sortie : c'est ce
+ * contenu ajouté à la main qui doit se retrouver dans le PDF de sortie.
+ */
+const DOC_EDL_TRAVAIL_SORTIE = DOC_EDL_TRAVAIL.map((p) => p
+  .replace('nouvelle adresse :', 'nouvelle adresse : 9 rue Suivante, 33000 Bordeaux')
+  .replace('123 / sortie', '123 / sortie 189')
+  .replace('4567 / sortie', '4567 / sortie 5901')
+  .replace('Mobilier chambre 2 — état : BE', 'Mobilier chambre 2 — entrée BE / sortie EU, rayure bureau'));
 
 /**
  * Construit un environnement complet (stubs + données) et y charge le code.
@@ -88,6 +166,13 @@ function creerEnvironnement(opts) {
   const dossierLocataires = drive.creerDossier('folder-locataires', 'LOCATAIRES', 'root');
   const docBail = drive.creerDoc('Bail_Template', opts.templateBail || TEMPLATE_BAIL, 'root');
   const docEdl = drive.creerDoc('EDL_Template', opts.templateEdl || TEMPLATE_EDL, 'root');
+
+  // Google Docs DE TRAVAIL — ceux que la signature copie. Ils existent déjà
+  // quand le bail et l'EDL ont été générés par Code.gs.
+  const docBailTravail = drive.creerDoc('Bail_DUPONT_Marie_Chambre2',
+    opts.docBailTravail || DOC_BAIL_TRAVAIL, dossierLocataires.id);
+  const docEdlTravail = drive.creerDoc('EDL_DUPONT_Marie_Chambre2',
+    opts.docEdlTravail || DOC_EDL_TRAVAIL, dossierLocataires.id);
 
   // --- Config ------------------------------------------------------------
   const config = Object.assign({
@@ -121,7 +206,9 @@ function creerEnvironnement(opts) {
     Compteur_Eau: '123',
     Compteur_Elec: '4567',
     ID_PDF_BAIL: 'pdf-bail-existant',
-    ID_PDF_EDL: 'pdf-edl-existant'
+    ID_PDF_EDL: 'pdf-edl-existant',
+    ID_DOC_BAIL: docBailTravail.id,
+    ID_DOC_EDL: docEdlTravail.id
   }];
 
   const lignes = (opts.locataires || locatairesParDefaut).map((loc) =>
@@ -143,6 +230,7 @@ function creerEnvironnement(opts) {
   const props = stubs.construirePropertiesService(Object.assign({
     DOCUMENSO_API_TOKEN: 'api_token_de_test'
   }, opts.proprietes || {}));
+  const lockService = stubs.construireLockService();
 
   const journaux = [];
   const sandbox = {
@@ -152,6 +240,7 @@ function creerEnvironnement(opts) {
     UrlFetchApp: urlFetch,
     Utilities: stubs.construireUtilities(),
     PropertiesService: props,
+    LockService: lockService,
     Session: { getScriptTimeZone: () => 'Europe/Paris' },
     Logger: { log: (m) => journaux.push(String(m)) },
     MimeType: { PDF: 'application/pdf', GOOGLE_DOCS: 'application/vnd.google-apps.document' },
@@ -201,9 +290,12 @@ function creerEnvironnement(opts) {
     props,
     onglets,
     journaux,
+    lockService,
     ids: {
       bailTemplate: docBail.id,
       edlTemplate: docEdl.id,
+      bailTravail: docBailTravail.id,
+      edlTravail: docEdlTravail.id,
       dossierLocataires: dossierLocataires.id
     }
   };
@@ -237,6 +329,9 @@ module.exports = {
   EN_TETES_LOCATAIRES,
   TEMPLATE_BAIL,
   TEMPLATE_EDL,
+  DOC_BAIL_TRAVAIL,
+  DOC_EDL_TRAVAIL,
+  DOC_EDL_TRAVAIL_SORTIE,
   FICHIERS_GS,
   TOUS_LES_GS
 };
