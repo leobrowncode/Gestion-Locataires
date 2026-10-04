@@ -71,7 +71,7 @@ class FakeBody {
     this.paragraphes.forEach((p) => { p.text = p.text.replace(re, replacement); });
     return this;
   }
-  // findText n'est utilisé que par setTextColor / insertSignatureImage :
+  // findText n'est utilisé que par insertSignatureImage :
   // renvoyer null équivaut à « aucune occurrence », ce qui est inoffensif ici.
   findText() { return null; }
   getNumChildren() { return this.paragraphes.length; }
@@ -149,7 +149,7 @@ function construireDriveApp(drive) {
       getId: () => brut.id,
       getName: () => brut.name,
       setName: (n) => { brut.name = n; return wrapFile(brut); },
-      getLastUpdated: () => new Date(),
+      getLastUpdated: () => brut.lastUpdated || new Date(),
       setTrashed: (v) => { brut.trashed = !!v; return wrapFile(brut); },
       isTrashed: () => !!brut.trashed,
       makeCopy: (nom, dossier) => {
@@ -349,7 +349,10 @@ const MOIS_FORMAT = {
   'yyyy-MM-dd': (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
   yyyyMMdd: (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`,
   'dd/MM/yyyy HH:mm': (d) =>
-    `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`,
+  'yyyy-MM-dd HH:mm:ss': (d) =>
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 };
 function pad(n) { return (n < 10 ? '0' : '') + n; }
 

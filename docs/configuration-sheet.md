@@ -38,7 +38,7 @@ Format de la colonne : monétaire € (le code accepte nombre brut ou `"224,00 �
 
 | Clé | Valeur |
 |---|---|
-| `EMAIL_AMI_EDL` | Adresse email de la personne qui réalise les états des lieux sur place (destinataire du brouillon EDL Word + PDF) |
+| `EMAIL_AMI_EDL` | Adresse email de la personne qui réalise les états des lieux sur place (destinataire du brouillon contenant le lien du Google Doc de l'EDL) |
 
 *(Pas de clé pour le dossier OLD : le sous-dossier `LOCATAIRES/OLD` est créé automatiquement au premier archivage.)*
 
@@ -64,20 +64,17 @@ Corps HTML à coller tels quels dans la colonne `CORPS` (les autres templates so
   <li><b>Logement :</b> {{Location_Adresse}} — Chambre n°{{Chambre}}</li>
   <li><b>Période du bail :</b> du {{Date_Début}} au {{Date_Fin}}</li>
 </ul>
-<p>Tu trouveras en pièces jointes :</p>
-<ul>
-  <li>l'état des lieux au format <b>Word</b> (modifiable — c'est celui-là qu'il faut compléter) ;</li>
-  <li>la version <b>PDF</b> pour référence.</li>
-</ul>
+<p>L'état des lieux est à compléter <b>directement dans ce Google Doc</b> (je te l'ai partagé) :<br>
+<a href="{{Lien_EDL}}">{{Lien_EDL}}</a></p>
 <p><b>À faire sur place :</b></p>
 <ul>
-  <li>relever les compteurs (électricité + eau chaude, compteur sous la trappe du meuble de salle de bain) et les noter dans le document ;</li>
+  <li>relever les compteurs (électricité + eau chaude, compteur sous la trappe du meuble de salle de bain) et les noter <b>dans le document</b>, à l'entrée comme à la sortie, ainsi que la nouvelle adresse du locataire à la sortie ;</li>
   <li>vérifier l'état de la chambre pièce par pièce (sols, murs, plafonds, mobilier) avec la légende TB / BE / EU / M ;</li>
   <li>vérifier les parties communes (entrée, salon, cuisine, salle de bain, WC, cellier, balcon) ;</li>
   <li>compter les clés remises/rendues : badge immeuble (1), clé appartement (1), clé boîte aux lettres (1) ;</li>
-  <li>prendre des photos en cas de dégradation ;</li>
-  <li>faire signer le document par le locataire, puis me renvoyer le fichier complété (ou scanné).</li>
+  <li>prendre des photos en cas de dégradation.</li>
 </ul>
+<p><b>Important :</b> ne modifie pas les textes entre doubles crochets (<code>[[SIGNATURE_…]]</code>, <code>[[DATE_…]]</code>) ni les zones de signature : le locataire et moi signerons ensuite électroniquement, via Documenso.</p>
 <p>Merci beaucoup !<br>{{Bailleur_Nom}}</p>
 ```
 
@@ -134,8 +131,9 @@ L'archivage peut aussi être lancé à la demande via le menu **🗂️ Archiver
 
 1. Préavis reçu → saisir **`Date_Fin`** dans la ligne du locataire → `Dernier_Loyer` se calcule tout seul
 2. Menu **📩 Répondre au préavis** → brouillon Gmail au locataire (consignes ménage + dernier loyer + déroulé sortie)
-3. Menu **📧 Envoyer l'EDL à l'ami** → brouillon Gmail à ton ami avec l'EDL en Word + PDF
-4. Au retour de l'EDL : saisir `Compteur_Eau_Sortie`, `Compteur_Elec_Sortie`, `Locataire_Nouvelle_Adresse` → régénérer l'EDL (les champs sortie passent en noir)
-5. Quittance du mois de sortie (menu, groupée ou web app) → **détection automatique du dernier loyer** : montant `Dernier_Loyer`, période du 1er du mois au `Date_Fin`
-6. ⚠️ Générer la dernière quittance **avant** de décocher `Actif` (un colocataire inactif bloque les quittances)
-7. Décocher la case **`Actif`** → au prochain 1er du mois (ou via le menu), son dossier Drive part dans `LOCATAIRES/OLD`
+3. Partager le Google Doc de l'EDL (colonne `ID_DOC_EDL`) avec ton ami, en modification, puis menu **📧 Envoyer le lien de l'EDL à l'ami** → brouillon Gmail avec le lien du Google Doc
+4. L'ami saisit les relevés et constats de sortie directement dans le Google Doc. ⚠️ Ne **pas** régénérer l'EDL : cela recopierait le modèle et effacerait tout ce qu'il a saisi
+5. Signature de l'EDL de sortie : web app ▸ Signature électronique ▸ EDL de sortie (cf. [`documenso.md`](documenso.md))
+6. Quittance du mois de sortie (menu, groupée ou web app) → **détection automatique du dernier loyer** : montant `Dernier_Loyer`, période du 1er du mois au `Date_Fin`
+7. ⚠️ Générer la dernière quittance **avant** de décocher `Actif` (un colocataire inactif bloque les quittances)
+8. Décocher la case **`Actif`** → au prochain 1er du mois (ou via le menu), son dossier Drive part dans `LOCATAIRES/OLD`

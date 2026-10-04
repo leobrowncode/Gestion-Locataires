@@ -107,12 +107,19 @@ Aucune enveloppe n'est créée et aucun email n'est envoyé à cette étape.
 ```
 Google Doc de travail (ID_DOC_BAIL, conservé par generateLeaseDoc)
   └─ copie technique  →  marqueurs bail → {{signature,rN}} / {{date,rN}}
-        └─ export PDF  →  …_Bail_<NOM>_NON_SIGNE.pdf   (conservé, envoyé à Documenso)
+        └─ export PDF  →  …_Bail_<NOM>_NON_SIGNE.pdf   (envoyé à Documenso, puis mis à la corbeille)
               └─ copie technique mise à la corbeille
 ```
 
-Le Google Doc source n'est jamais modifié ; le PDF signé revient sous
-`…_Bail_<NOM>_SIGNE.pdf` et ne remplace pas le PDF non signé.
+Le Google Doc source n'est jamais modifié. Le PDF `…_NON_SIGNE.pdf` ne reste dans
+`Signature/` qu'en mode test. Après un envoi réel il est mis à la corbeille dès que
+Documenso a le fichier. Quand le PDF signé est archivé, le PDF non signé du dossier
+du locataire (`ID_PDF_BAIL`) l'est aussi, et la fiche pointe vers `…_Bail_<NOM>_SIGNE.pdf`.
+
+Avant la distribution, les champs de signature détectés sont agrandis (28 % × 8 % de
+la page). La date du même signataire, écrite juste sous le marqueur, est décalée
+sous ce rectangle pour ne pas être recouverte. Sans cela, Documenso donne au champ
+la taille du texte `{{signature,r1}}`, soit une signature d'une ligne.
 
 ### 3.2 L'état des lieux — un Doc de travail, deux campagnes
 
@@ -122,11 +129,15 @@ L'état des lieux est **un seul Google Doc** qui sert à l'entrée puis à la so
 d'**entrée** deviennent des placeholders et ceux de **sortie** sont effacés. Le PDF d'entrée est
 envoyé, signé, puis archivé sous `…_EDL_ENTREE_<NOM>_SIGNE.pdf`.
 
-**À la sortie** — l'utilisateur reprend **le même Google Doc** et le complète : états de sortie,
-commentaires, relevés, clés. Le système en fait une **nouvelle** copie technique ; cette fois les
-marqueurs de **sortie** deviennent des placeholders et ceux d'**entrée** sont effacés. Le PDF de
-sortie contient donc les données d'entrée *et* de sortie, et devient un **nouveau fichier**
-`…_EDL_SORTIE_<NOM>_SIGNE.pdf`.
+**À la sortie** — la personne qui réalise l'état des lieux complète **le même Google Doc**, que le
+bailleur lui a partagé (lien envoyé par « 📧 Envoyer le lien de l'EDL à l'ami ») : états de sortie,
+relevés, commentaires, clés. **Sans régénérer** l'EDL, ce qui effacerait les constats. Le système
+fait ensuite une **nouvelle** copie technique ; cette fois les marqueurs de **sortie** deviennent
+des placeholders et ceux d'**entrée** sont effacés. Le PDF de sortie contient donc les données
+d'entrée *et* de sortie, et devient un **nouveau fichier** `…_EDL_SORTIE_<NOM>_SIGNE.pdf`.
+
+Toute variable `{{…}}` restante bloque l'envoi. Avant un envoi `EDL_SORTIE`, le récapitulatif
+**avertit** (sans bloquer) si le Google Doc n'a pas été modifié depuis la campagne d'entrée.
 
 Garanties, vérifiées par les tests :
 
@@ -336,6 +347,38 @@ npm test        # suite complète, API Documenso mockée
 npm run check   # les deux
 ```
 
+### 9.1 Recette contre la vraie API — environnement de test Documenso
+
+Les tests automatisés simulent l'API : ils ne prouvent pas que les appels réels fonctionnent. Avant
+le premier envoi en production, dérouler une recette sur `stg-app.documenso.com`, environnement
+distinct et gratuit qui ne consomme pas le quota de production.
+
+1. Créer un compte sur `https://stg-app.documenso.com` (le compte de production n'y est pas valable)
+   et un token (*Team Settings ▸ API Tokens*).
+2. Propriétés de script : `DOCUMENSO_BASE_URL = https://stg-app.documenso.com/api/v2`,
+   `DOCUMENSO_API_TOKEN = <token de recette>`.
+3. Ligne de test dans `Locataires` dont l'`EMAIL` est une adresse **du bailleur**, différente de
+   `Bailleur_Email` (par exemple un alias `+test`) : aucun vrai locataire n'est sollicité.
+4. Dérouler `BAIL`, `EDL_ENTREE`, `EDL_SORTIE`, `BAIL_ET_EDL_ENTREE`, puis un refus et une annulation.
+
+Points à vérifier :
+
+| Point | Attendu |
+|---|---|
+| Envoi multipart `files[]` via `UrlFetchApp` | enveloppe créée, avec 1 puis 2 PDF |
+| Détection des placeholders lors d'un envoi par l'API | 4 champs par document |
+| Destinataires | **2** au total (pas de doublon entre les rangs `r1`/`r2` des placeholders et ceux du payload), champs rattachés aux bonnes adresses |
+| Ordre séquentiel | le « locataire » ne reçoit rien avant la signature du bailleur |
+| « Signer maintenant » | `signingUrl` du bailleur présent après distribution |
+| Archivage | PDF signés (`version=signed`) et certificat déposés dans `Signature/` |
+| Quota | une enveloppe à deux PDF compte pour 1 ou 2 documents sur l'offre gratuite (5/mois) ? |
+
+Le suivi horaire, lui, ne consomme rien à vide : `actualiserStatutsSignature` ne contacte l'API que
+pour les campagnes non terminées.
+
+Tout écart se corrige dans `Documenso.gs` et donne lieu à un test de non-régression. Remettre
+ensuite `DOCUMENSO_BASE_URL` à sa valeur par défaut et le token de production.
+
 ---
 
 ## 10. Modèle de données — onglet `SignatureRequests`
@@ -394,16 +437,18 @@ suffixe `-ch<n>` est neutralisé à la comparaison.
 Dans `LOCATAIRES/<Locataire_Nom>/Signature/` :
 
 ```
-2026-08-31_Bail_DUPONT_NON_SIGNE.pdf          exactement ce qui a été envoyé
 2026-08-31_Bail_DUPONT_SIGNE.pdf              version signée, téléchargée avec version=signed
-2026-08-31_EDL_ENTREE_DUPONT_NON_SIGNE.pdf
 2026-08-31_EDL_ENTREE_DUPONT_SIGNE.pdf
-2026-08-31_EDL_SORTIE_DUPONT_NON_SIGNE.pdf
 2026-08-31_EDL_SORTIE_DUPONT_SIGNE.pdf
 2026-08-31_Certificat-signature_DUPONT.pdf    best effort
 2026-08-31_Journal-audit_DUPONT.pdf           best effort
 _Technique/                                    copies jetables (vidées après export)
 ```
+
+Les PDF `…_NON_SIGNE.pdf` sont produits pour l'envoi, puis mis à la corbeille. En mode
+test ils restent, pour vérifier les placeholders. Le PDF non signé généré dans le
+dossier du locataire est retiré au moment de l'archivage du signé ; un PDF déjà
+signé (par exemple l'EDL d'entrée) n'est jamais supprimé par la campagne de sortie.
 
 Une enveloppe à deux documents donne **deux** PDF signés, aux noms distincts. Chaque fichier écrit
 est relu pour confirmer sa création avant d'être compté comme archivé, et un document déjà archivé

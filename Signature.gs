@@ -167,6 +167,14 @@ var SIGNATURE_CHAMPS_ATTENDUS = [
 var SIGNATURE_DOSSIER = 'Signature';
 var SIGNATURE_DOSSIER_TECHNIQUE = '_Technique';
 
+/**
+ * Taille imposée aux champs de signature, en pourcentage de la page.
+ * 28 × 8 sur une page A4 donne environ 6 cm × 2,4 cm — lisible, sans couvrir
+ * la colonne d'en face. La position reste celle du placeholder.
+ */
+var SIGNATURE_LARGEUR_CHAMP = 28;
+var SIGNATURE_HAUTEUR_CHAMP = 8;
+
 /** Expression de validation d'email (identique à celle de la web app). */
 var SIGNATURE_EMAIL_REGEX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -1104,6 +1112,10 @@ function preflightSignature(ctx, options) {
     var soucis = verifierMarqueursDocument(docId, libelle, typeDoc, ctx.etatDesLieuxType);
     if (soucis) blocages.push(soucis);
 
+    if (typeDoc === 'EDL' && ctx.etatDesLieuxType === 'SORTIE') {
+      avertissements = avertissements.concat(verifierEdlSortieComplete(docId, ctx.dossierId));
+    }
+
     if (!(ctx.tenant[meta.colonnePdf] || '').toString().trim()) {
       avertissements.push(libelle + ' : la colonne ' + meta.colonnePdf +
                           ' est vide — le PDF de référence n\'a pas été enregistré, mais le ' +
@@ -1245,6 +1257,41 @@ function verifierMarqueursDocument(docId, libelle, typeDoc, edlType) {
            'puis régénérez le document (voir docs/documenso.md).';
   }
   return null;
+}
+
+
+/**
+ * Signale un EDL de sortie probablement incomplet : le Google Doc n'a pas
+ * bougé depuis la campagne d'entrée. Avertissement seulement.
+ *
+ * @param {string} docId — ID du Google Doc de travail de l'EDL.
+ * @param {string} dossierId
+ * @return {string[]} Avertissements (vide si rien à signaler).
+ */
+function verifierEdlSortieComplete(docId, dossierId) {
+  var avertissements = [];
+
+  var entrees = lireDemandesSignature().filter(function(d) {
+    return signatureMemeDossier(d['dossierId'], dossierId) &&
+           ['EDL_ENTREE', 'BAIL_ET_EDL_ENTREE'].indexOf(d['campaignType'].toString()) !== -1 &&
+           ['REJECTED', 'CANCELLED'].indexOf(d['status'].toString().toUpperCase()) === -1;
+  });
+  var entree = entrees.length ? entrees[entrees.length - 1] : null;
+  var revisionEntree = entree ? signatureParserPaires(entree['sourceRevisionIds'])['EDL'] : '';
+  if (revisionEntree) {
+    var revisionActuelle = '';
+    try {
+      revisionActuelle = Utilities.formatDate(DriveApp.getFileById(docId).getLastUpdated(),
+                                              Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+    } catch (e2) {
+      revisionActuelle = '';
+    }
+    if (revisionActuelle && revisionActuelle <= revisionEntree) {
+      avertissements.push('Le Google Doc de l\'EDL n\'a pas été modifié depuis l\'envoi de l\'EDL ' +
+                          'd\'entrée (' + revisionEntree + ') : l\'état de sortie est-il bien rempli ?');
+    }
+  }
+  return avertissements;
 }
 
 
@@ -1501,6 +1548,25 @@ function envoyerDemandeSignatureVerrouillee(ctx, pre, dryRun, options) {
     throw new Error(msgChamps);
   }
 
+  // Le champ auto-détecté a la taille du texte {{signature,rN}}. On l'agrandit
+  // tant que l'enveloppe est encore en brouillon : après distribution, Documenso
+  // refuse toute modification de champ.
+  var tailles = signatureMisesAJourTaille(enveloppe);
+  if (tailles.length) {
+    try {
+      client.updateFields(creation.envelopeId, tailles);
+    } catch (eTaille) {
+      signatureEnregistrerErreur(ligne, eTaille, 'agrandissement des champs de signature',
+                                 SIGNATURE_ERREURS.CHAMPS_INVALIDES, creation.envelopeId);
+      throw new Error(
+        'Enveloppe ' + creation.envelopeId + ' créée EN BROUILLON mais NON distribuée : ' +
+        'impossible d\'agrandir les champs de signature.\n' +
+        signatureMessageErreur(eTaille, 'agrandissement des champs de signature',
+                               creation.envelopeId, signatureRequestId) +
+        '\nAucun email n\'a été envoyé.');
+    }
+  }
+
   // --- 7. Distribution ------------------------------------------------------
   var distribution;
   try {
@@ -1537,6 +1603,12 @@ function envoyerDemandeSignatureVerrouillee(ctx, pre, dryRun, options) {
     'lastErrorCode': '',
     'lastErrorMessage': ''
   });
+
+  // Le PDF est déjà chez Documenso. Le garder dans Signature/ double le bail
+  // et l'EDL non signés déjà présents dans le dossier du locataire.
+  for (var n = 0; n < prepares.length; n++) {
+    signatureMettreALaCorbeille(prepares[n].pdfFile.getId());
+  }
 
   return {
     ok: true,
@@ -1736,6 +1808,10 @@ function signatureFormaterInstant(valeur) {
  */
 function actualiserStatutsSignature(deps) {
   deps = deps || {};
+  // Les campagnes déjà terminées ne sont plus interrogées, mais leurs PDF non
+  // signés (Signature/ et dossier du locataire) sont retirés s'ils traînent.
+  try { nettoyerPdfsDejaSignes(deps.filtreDossierId); } catch (ignoreNettoyage) {}
+
   var demandes = lireDemandesSignature().filter(function(d) {
     var st = (d['status'] || '').toString().toUpperCase();
     if (SIGNATURE_STATUTS_FINAUX.indexOf(st) !== -1) return false;
@@ -1805,6 +1881,10 @@ function actualiserStatutsSignature(deps) {
         var archive = archiverDocumentsSignes(client, d, config, enveloppe);
         patch['signedPdfFileIds'] = signatureSerialiserPaires(archive.fichiers);
         if (archive.auditFileId) patch['auditMetadataFileId'] = archive.auditFileId;
+
+        if (!archive.manquants.length) {
+          try { retirerPdfsNonSignes(d, archive.fichiers); } catch (ignoreNettoyage) {}
+        }
 
         if (archive.manquants.length) {
           patch['status'] = SIGNATURE_STATUTS.ERROR;
@@ -1885,6 +1965,216 @@ function signatureTriggerInstalle() {
 }
 
 
+/** Identifiant de champ tel que l'attend Documenso (nombre si l'API l'a renvoyé ainsi). */
+function signatureIdChamp(id) {
+  var s = (id === null || id === undefined) ? '' : id.toString();
+  return /^\d+$/.test(s) ? parseInt(s, 10) : id;
+}
+
+/** Arrondi au dixième, pour des pourcentages de page stables. */
+function signaturePourcentage(valeur) {
+  return Math.round(valeur * 10) / 10;
+}
+
+/**
+ * Mises à jour de taille, prêtes pour POST /envelope/field/update-many.
+ *
+ * Le champ signature est agrandi, mais la date du même signataire est écrite
+ * juste en dessous dans la cellule. Sans la déplacer, le rectangle de
+ * signature recouvre la date. S'il n'y a pas la place en bas de page, la
+ * signature est raccourcie pour s'arrêter au-dessus de la date.
+ *
+ * @param {Object} enveloppe — Enveloppe normalisée.
+ * @return {Array<Object>}
+ */
+function signatureMisesAJourTaille(enveloppe) {
+  var data = [];
+  var champs = (enveloppe && enveloppe.champs) || [];
+  var ecart = 1;
+
+  for (var i = 0; i < champs.length; i++) {
+    var champ = champs[i];
+    if (champ.type !== 'SIGNATURE' || !champ.id) continue;
+
+    var x = champ.positionX;
+    var y = champ.positionY;
+    var largeur = SIGNATURE_LARGEUR_CHAMP;
+    var hauteur = SIGNATURE_HAUTEUR_CHAMP;
+
+    if (x !== null && x !== undefined) {
+      largeur = Math.min(largeur, Math.max(12, 97 - x));
+      for (var v = 0; v < champs.length; v++) {
+        var voisin = champs[v];
+        if (voisin === champ || voisin.envelopeItemId !== champ.envelopeItemId) continue;
+        if (voisin.positionX === null || voisin.positionX === undefined) continue;
+        if (voisin.positionX <= x + 1) continue;
+        largeur = Math.min(largeur, Math.max(12, voisin.positionX - x - 1));
+      }
+    }
+
+    var date = null;
+    for (var d = 0; d < champs.length; d++) {
+      var candidat = champs[d];
+      if (candidat.type !== 'DATE' || !candidat.id) continue;
+      if (candidat.envelopeItemId !== champ.envelopeItemId) continue;
+      if (candidat.recipientId !== champ.recipientId) continue;
+      date = candidat;
+      break;
+    }
+
+    var deplacementDate = null;
+    if (y !== null && y !== undefined && date && date.positionY !== null && date.positionY > y) {
+      var hauteurDate = date.height || 2;
+      var dateSousSignature = y + hauteur + ecart;
+      if (date.positionY < y + hauteur + ecart) {
+        if (dateSousSignature + hauteurDate <= 97) {
+          deplacementDate = dateSousSignature;
+        } else {
+          hauteur = Math.max(2, Math.min(hauteur, date.positionY - y - ecart));
+        }
+      }
+    } else if (y !== null && y !== undefined) {
+      hauteur = Math.min(hauteur, Math.max(2, 97 - y));
+    }
+
+    data.push({
+      id: signatureIdChamp(champ.id),
+      type: 'SIGNATURE',
+      width: signaturePourcentage(largeur),
+      height: signaturePourcentage(hauteur)
+    });
+    if (deplacementDate !== null) {
+      data.push({
+        id: signatureIdChamp(date.id),
+        type: 'DATE',
+        positionY: signaturePourcentage(deplacementDate)
+      });
+    }
+  }
+  return data;
+}
+
+/** Met un fichier Drive à la corbeille. false s'il est déjà absent. */
+function signatureMettreALaCorbeille(fileId) {
+  if (!fileId) return false;
+  try {
+    var f = DriveApp.getFileById(fileId.toString());
+    if (f.isTrashed && f.isTrashed()) return false;
+    f.setTrashed(true);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** true si le nom du fichier est celui d'un PDF signé archivé par ce module. */
+function signatureEstPdfSigne(fileId) {
+  if (!fileId) return false;
+  try {
+    return /_SIGNE\.pdf$/i.test(DriveApp.getFileById(fileId.toString()).getName());
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Locataire rattaché à une campagne, ou null. Même règle que
+ * signatureNomLocataireDeDemande : tenantRow n'est retenu que s'il désigne
+ * encore le même dossier.
+ *
+ * @param {Object} demande
+ * @return {Object|null}
+ */
+function signatureTenantDeDemande(demande) {
+  var cle = signatureDossierCle(demande['dossierId']);
+  var row = parseInt(demande['tenantRow'], 10);
+  if (row >= 2) {
+    try {
+      var direct = getTenantByRow(row);
+      if (!cle || signatureMemeDossier(signatureDossierId(direct), cle)) return direct;
+    } catch (e) { /* ligne supprimée ou hors plage */ }
+  }
+  if (!cle) return null;
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Locataires');
+  if (!sheet) return null;
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return null;
+  var headers = data[0];
+  var iNom = -1;
+  var iChambre = -1;
+  var iDossier = -1;
+  for (var c = 0; c < headers.length; c++) {
+    var h = headers[c].toString().trim();
+    if (h === 'Locataire_Nom') iNom = c;
+    else if (h === 'Chambre') iChambre = c;
+    else if (h === 'dossierId') iDossier = c;
+  }
+  if (iNom === -1) return null;
+  for (var r = 1; r < data.length; r++) {
+    var ligne = {
+      'Locataire_Nom': data[r][iNom],
+      'Chambre': iChambre === -1 ? '' : data[r][iChambre],
+      'dossierId': iDossier === -1 ? '' : data[r][iDossier]
+    };
+    if (signatureMemeDossier(signatureDossierId(ligne), cle)) {
+      try { return getTenantByRow(r + 1); } catch (e2) { return null; }
+    }
+  }
+  return null;
+}
+
+/**
+ * Retire les PDF non signés d'une campagne dont les PDF signés sont en place.
+ *
+ * Deux emplacements : le `…_NON_SIGNE.pdf` de Signature/, et le PDF généré
+ * dans le dossier du locataire (`ID_PDF_BAIL` / `ID_PDF_EDL`). Un PDF déjà
+ * signé n'est jamais mis à la corbeille — l'EDL de sortie ne doit pas
+ * supprimer le PDF d'entrée signé si la fiche pointe encore dessus.
+ * La colonne du Sheet est ensuite réorientée vers le PDF signé.
+ *
+ * @param {Object} demande
+ * @param {Object} [fichiersSignes] — { BAIL: id, EDL: id }. Défaut : la ligne.
+ */
+function retirerPdfsNonSignes(demande, fichiersSignes) {
+  fichiersSignes = fichiersSignes || signatureParserPaires(demande['signedPdfFileIds']);
+  var nonSignes = signatureParserPaires(demande['unsignedPdfFileIds']);
+  var tenant = signatureTenantDeDemande(demande);
+
+  for (var type in fichiersSignes) {
+    if (!SIGNATURE_DOCUMENTS[type]) continue;
+    var signeId = (fichiersSignes[type] || '').toString();
+    if (!signeId || !signatureFichierExiste(signeId)) continue;
+
+    var nonSigneId = (nonSignes[type] || '').toString();
+    if (nonSigneId && nonSigneId !== signeId && !signatureEstPdfSigne(nonSigneId)) {
+      signatureMettreALaCorbeille(nonSigneId);
+    }
+
+    if (!tenant || !tenant._sheet) continue;
+    var colonne = SIGNATURE_DOCUMENTS[type].colonnePdf;
+    var pdfLocataire = (tenant[colonne] || '').toString().trim();
+    if (pdfLocataire && pdfLocataire !== signeId && !signatureEstPdfSigne(pdfLocataire)) {
+      signatureMettreALaCorbeille(pdfLocataire);
+    }
+    if (pdfLocataire !== signeId) {
+      updateTenantCellIfExists(tenant._sheet, tenant._rowIndex, colonne, signeId);
+      tenant[colonne] = signeId;
+    }
+  }
+}
+
+/** Nettoie les PDF non signés des campagnes déjà COMPLETED. */
+function nettoyerPdfsDejaSignes(filtreDossierId) {
+  var demandes = lireDemandesSignature().filter(function(d) {
+    if ((d['status'] || '').toString().toUpperCase() !== SIGNATURE_STATUTS.COMPLETED) return false;
+    if (filtreDossierId && !signatureMemeDossier(d['dossierId'], filtreDossierId)) return false;
+    return true;
+  });
+  for (var i = 0; i < demandes.length; i++) retirerPdfsNonSignes(demandes[i]);
+}
+
+
 // ---------------------------------------------------------------------------
 // 11. ARCHIVAGE DES DOCUMENTS SIGNÉS
 // ---------------------------------------------------------------------------
@@ -1898,8 +2188,8 @@ function signatureTriggerInstalle() {
  * fichier écrit est relu pour confirmer sa création avant d'être compté comme
  * archivé, et un élément déjà archivé n'est pas re-téléchargé.
  *
- * Les PDF non signés (…_NON_SIGNE.pdf) et les Google Docs de travail restent
- * intacts : rien n'est écrasé.
+ * Les Google Docs de travail restent intacts. Les PDF non signés sont retirés
+ * ensuite par retirerPdfsNonSignes, une fois le PDF signé confirmé dans Drive.
  *
  * @param {DocumensoClient} client
  * @param {Object} demande — Ligne de campagne.

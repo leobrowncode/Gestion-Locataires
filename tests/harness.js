@@ -30,8 +30,7 @@ const TOUS_LES_GS = ['Code.gs', 'Code_Compta.gs', 'WebApp.gs', 'Documenso.gs', '
 const EN_TETES_LOCATAIRES = [
   'Actif', 'Locataire_Nom', 'Locataire_Date', 'Locataire_Lieu', 'EMAIL', 'TELEPHONE',
   'Locataire_Adresse', 'Chambre', 'Date_Début', 'Date_Fin', '1er_Loyer', 'Assurance',
-  'Compteur_Eau', 'Compteur_Elec', 'Compteur_Eau_Sortie', 'Compteur_Elec_Sortie',
-  'Locataire_Nouvelle_Adresse', 'ID_PDF_EDL', 'ID_DOC_BAIL', 'ID_PDF_BAIL', 'NOTES',
+  'Compteur_Eau', 'Compteur_Elec', 'ID_PDF_EDL', 'ID_DOC_BAIL', 'ID_PDF_BAIL', 'NOTES',
   'Dernier_Loyer', 'ID_DOC_EDL',
   'bailSignatureRequestId', 'entrySignatureRequestId', 'exitSignatureRequestId'
 ];
@@ -62,14 +61,14 @@ const TEMPLATE_BAIL = [
 
 /**
  * Modèle d'EDL : un seul document pour l'entrée ET la sortie, avec les deux
- * blocs de signature. Les balises de sortie restent en blanc à l'entrée.
+ * blocs de signature. Les relevés de sortie sont saisis à la main dans le Doc.
  */
 const TEMPLATE_EDL = [
   'ÉTAT DES LIEUX CONTRADICTOIRE',
   'Bailleur : {{Bailleur_Nom}} — {{Bailleur_Adresse}}',
-  'Locataire : {{Locataire_Nom}} — nouvelle adresse : {{Locataire_Nouvelle_Adresse}}',
-  'Compteur eau : {{Compteur_Eau}} / sortie {{Compteur_Eau_Sortie}}',
-  'Compteur élec : {{Compteur_Elec}} / sortie {{Compteur_Elec_Sortie}}',
+  'Locataire : {{Locataire_Nom}}',
+  'Compteur eau : {{Compteur_Eau}}',
+  'Compteur élec : {{Compteur_Elec}}',
   '3. État des parties privatives',
   'CHAMBRE N°1',
   'Mobilier chambre 1',
@@ -112,15 +111,14 @@ const DOC_BAIL_TRAVAIL = [
 
 /**
  * Google Doc de travail de l'EDL après l'entrée : chambres 1 et 3 retirées,
- * relevés d'entrée saisis, colonnes de sortie encore vides. C'est CE document
- * que l'utilisateur complète plus tard pour la sortie.
+ * relevés d'entrée saisis. C'est CE document que l'ami complète pour la sortie.
  */
 const DOC_EDL_TRAVAIL = [
   'ÉTAT DES LIEUX CONTRADICTOIRE',
   'Bailleur : Jean MARTIN — 1 rue des Tests, 33000 Bordeaux',
-  'Locataire : DUPONT Marie — nouvelle adresse :',
-  'Compteur eau : 123 / sortie',
-  'Compteur élec : 4567 / sortie',
+  'Locataire : DUPONT Marie',
+  'Compteur eau : 123',
+  'Compteur élec : 4567',
   '3. État des parties privatives',
   'CHAMBRE N°2',
   'Mobilier chambre 2 — état : BE',
@@ -139,13 +137,13 @@ const DOC_EDL_TRAVAIL = [
 ];
 
 /**
- * Le même Doc de travail, complété par l'utilisateur pour la sortie : c'est ce
- * contenu ajouté à la main qui doit se retrouver dans le PDF de sortie.
+ * Le même Doc de travail, complété à la main pour la sortie. Ce contenu doit
+ * se retrouver dans le PDF de sortie.
  */
 const DOC_EDL_TRAVAIL_SORTIE = DOC_EDL_TRAVAIL.map((p) => p
-  .replace('nouvelle adresse :', 'nouvelle adresse : 9 rue Suivante, 33000 Bordeaux')
-  .replace('123 / sortie', '123 / sortie 189')
-  .replace('4567 / sortie', '4567 / sortie 5901')
+  .replace('Locataire : DUPONT Marie', 'Locataire : DUPONT Marie — nouvelle adresse : 9 rue Suivante, 33000 Bordeaux')
+  .replace('Compteur eau : 123', 'Compteur eau : 123 / sortie 189')
+  .replace('Compteur élec : 4567', 'Compteur élec : 4567 / sortie 5901')
   .replace('Mobilier chambre 2 — état : BE', 'Mobilier chambre 2 — entrée BE / sortie EU, rayure bureau'));
 
 /**

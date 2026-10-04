@@ -52,7 +52,7 @@ L'objectif est d'automatiser le cycle de vie d'un locataire :
 - 🚫 Annuler une demande de signature
 - ─────
 - 📩 Répondre au préavis (consignes ménage)
-- 📧 Envoyer l'EDL à l'ami (Word + PDF)
+- 📧 Envoyer le lien de l'EDL à l'ami
 - 🗂️ Archiver les dossiers inactifs (→ OLD)
 - 🔧 Réparer le suivi des loyers
 - ─────
@@ -95,15 +95,12 @@ Une ligne par locataire. Colonnes :
 | `Assurance` | Quote-part assurance habitation à régler à l'entrée |
 | `Compteur_Eau` | Relevé eau à l'entrée |
 | `Compteur_Elec` | Relevé électricité à l'entrée |
-| `Compteur_Eau_Sortie` | Relevé eau à la sortie |
-| `Compteur_Elec_Sortie` | Relevé élec à la sortie |
-| `Locataire_Nouvelle_Adresse` | Nouvelle adresse à la sortie |
 | `ID_PDF_EDL` | ID Drive du PDF d'état des lieux généré |
 | `ID_DOC_BAIL` | ID du **Google Doc** de bail (écrit automatiquement par `generateLeaseDoc`). Le Doc est conservé — c'est lui que la signature électronique copie. |
 | `ID_PDF_BAIL` | ID Drive du PDF de bail généré |
 | `NOTES` | Notes libres |
 | `Dernier_Loyer` | **Formule Sheet** : loyer TTC proratisé du mois de sortie = `Loyer CC × jour(Date_Fin) / nb jours du mois`. Vide tant que `Date_Fin` est vide. Lue par `detectMontantOverride` pour la quittance du mois de sortie. Écrasable manuellement (ex: entrée+sortie le même mois). |
-| `ID_DOC_EDL` | ID du **Google Doc** EDL (écrit automatiquement par `generateEDL` via les menus/web app). Utilisé pour l'export Word envoyé à l'ami. Fallback : recherche par nom `EDL_<Nom>...` dans le dossier du locataire. |
+| `ID_DOC_EDL` | ID du **Google Doc** EDL (écrit automatiquement par `generateEDL` via les menus/web app). Partagé à la main avec l'ami, qui le complète directement (lien envoyé par `createEDLAmiDraft`) ; c'est aussi le document que la signature électronique copie. Fallback : recherche par nom `EDL_<Nom>...` dans le dossier du locataire. |
 | `bailSignatureRequestId` | *(facultative, lecture seule)* Campagne de signature du bail. Écrite via `updateTenantCellIfExists` → silencieuse si la colonne n'existe pas. |
 | `entrySignatureRequestId` | *(facultative, lecture seule)* Campagne de signature de l'EDL d'entrée. |
 | `exitSignatureRequestId` | *(facultative, lecture seule)* Campagne de signature de l'EDL de sortie. |
@@ -151,7 +148,7 @@ Format : 2 colonnes (Clé / Valeur). Lu par `getConfig()`.
 | `ID_SIGNATURE_IMAGE` | `<ID de l'image PNG/JPG de signature>` |
 | `ID_DOSSIER_DOCS_COMMUNS` | `<ID du dossier Drive des documents communs>` |
 | `ID_ATTESTATION_ASSURANCE` | `<ID du Google Doc modèle d'attestation d'assurance>` |
-| `EMAIL_AMI_EDL` | Email de l'ami qui réalise les états des lieux (destinataire du brouillon EDL Word+PDF) |
+| `EMAIL_AMI_EDL` | Email de l'ami qui réalise les états des lieux (destinataire du brouillon contenant le lien du Google Doc de l'EDL) |
 | `Bailleur_Email` | Adresse email du bailleur — destinataire `r1` de la signature électronique (**obligatoire** pour signer) |
 
 > ⚠️ Le **token API Documenso** n'est **jamais** dans l'onglet `Config` : il vit dans
@@ -163,10 +160,10 @@ Format : 2 colonnes (Clé / Valeur). Lu par `getConfig()`.
 3 colonnes : `NOM_TEMPLATE`, `OBJET`, `CORPS` (HTML). Templates utilisés :
 
 - **`DEMANDE_PIECES`** — Demande des pièces justificatives (CNI, contrat de travail, 3 fiches de paie, mêmes pièces pour le garant ou Visale).
-- **`ENVOI_DOCUMENTS`** — Envoi du dossier complet (bail, EDL, inventaire meubles, diagnostics, règlement intérieur, attestation assurance) + montants à régler avant entrée (1er loyer + caution + assurance) + mention signature Yousign.
+- **`ENVOI_DOCUMENTS`** — Envoi du dossier complet (bail, EDL, inventaire meubles, diagnostics, règlement intérieur, attestation assurance) + montants à régler avant entrée (1er loyer + caution + assurance) + annonce de la demande de signature électronique Documenso.
 - **`ENVOI_QUITTANCE`** — Envoi de la quittance avec récap HC / Charges / CC.
 - **`ENVOI_ATTESTATION_DE_PAIEMENT_ASSURANCE`** — Attestation de paiement de la quote-part assurance habitation.
-- **`ENVOI_EDL_AMI`** — Envoi de l'EDL (Word modifiable + PDF) à l'ami qui réalise les états des lieux, avec instructions (compteurs, légende TB/BE/EU/M, clés, photos, signature).
+- **`ENVOI_EDL_AMI`** — Lien du Google Doc de l'EDL (`{{Lien_EDL}}`, ajouté en fin de message si absent du template) pour l'ami qui réalise les états des lieux, avec instructions (compteurs, légende TB/BE/EU/M, clés, photos, ne pas toucher aux marqueurs `[[…]]`). Aucune pièce jointe.
 - **`REPONSE_PREAVIS`** — Réponse au préavis du locataire : confirmation `{{Date_Fin}}`, dernier loyer proratisé `{{Dernier_Loyer}}`, consignes de ménage (chambre + parties communes), restitution clés, dépôt de garantie `{{Caution}}`.
 
 Les corps utilisent du **HTML** et des placeholders `{{Variable}}`.
@@ -179,7 +176,7 @@ Les modèles vivent sur Google Drive et sont référencés par leur ID dans l'on
 
 ### 3bis.1 `Bail_Template.docx` (`ID_BAIL_TEMPLATE`)
 
-Bail meublé conforme à la loi du 6 juillet 1989, signature électronique via Yousign.
+Bail meublé conforme à la loi du 6 juillet 1989, signature électronique via Documenso (§5.8).
 
 **Sections principales :**
 1. Parties (Bailleur / Locataire)
@@ -207,10 +204,10 @@ Bail meublé conforme à la loi du 6 juillet 1989, signature électronique via Y
 EDL contradictoire entrée + sortie sur le même document. Structure tableau avec doubles colonnes (Entrée / Sortie).
 
 **Sections :**
-1. Les Parties (Bailleur + Locataire avec `{{Locataire_Nouvelle_Adresse}}` pour la sortie)
+1. Les Parties (Bailleur + Locataire ; la nouvelle adresse de sortie est saisie à la main)
 2. Relevés et clés
-   - Compteur électricité : N° de série fixe `<N° de série du compteur>`, index `{{Compteur_Elec}}` / `{{Compteur_Elec_Sortie}}`
-   - Compteur eau chaude : N° série N/A, index `{{Compteur_Eau}}` / `{{Compteur_Eau_Sortie}}` (sous trappe meuble SDB)
+   - Compteur électricité : N° de série fixe `<N° de série du compteur>`, index d'entrée `{{Compteur_Elec}}` (l'index de sortie est saisi à la main)
+   - Compteur eau chaude : N° série N/A, index d'entrée `{{Compteur_Eau}}` (sous trappe meuble SDB ; l'index de sortie est saisi à la main)
    - Remise des clés : Badge immeuble (1), Clé porte appartement (1), Clé boîte aux lettres (1)
 3. État des parties privatives — **3 sous-sections marquées `CHAMBRE N°1`, `CHAMBRE N°2`, `CHAMBRE N°3`**
    - Chaque tableau chambre : Sols (Lame parquet PVC), Murs, Plafonds, Plinthes, Porte & Poignée, Fenêtre/Store/Volet, Prises & Interrupteurs, Luminaire/Ampoule, Mobilier (liste détaillée par chambre)
@@ -226,11 +223,11 @@ EDL contradictoire entrée + sortie sur le même document. Structure tableau ave
 5. Signatures (Bailleur + Locataire pour Entrée et pour Sortie)
 
 **Variables utilisées :**
-`{{Chambre}}`, `{{Bailleur_Nom}}`, `{{Bailleur_Adresse}}`, `{{Locataire_Nom}}`, `{{Locataire_Nouvelle_Adresse}}`, `{{Compteur_Elec}}`, `{{Compteur_Elec_Sortie}}`, `{{Compteur_Eau}}`, `{{Compteur_Eau_Sortie}}`.
+`{{Chambre}}`, `{{Bailleur_Nom}}`, `{{Bailleur_Adresse}}`, `{{Locataire_Nom}}`, `{{Compteur_Elec}}`, `{{Compteur_Eau}}`.
 
 **Légende des états** : `TB` (Très Bon Etat) - `BE` (Bon État) - `EU` (État d'Usage) - `M` (Mauvais).
 
-**Champs sortie en blanc** dans le template (couleur de police blanche). Si la cellule du Sheet est renseignée → Apps Script `setTextColor` repasse en noir, sinon la balise reste invisible dans le PDF.
+Les relevés et constats de sortie sont saisis à la main dans le Google Doc de travail, pas par le script.
 
 ### 3bis.3 `Quittance_Template.docx` (`ID_QUITTANCE_TEMPLATE`)
 
@@ -366,8 +363,8 @@ l'actualisation suivante reprend où elle s'était arrêtée.
 ### 4.4 Variables financières / dossier (emails)
 `{{1er_Loyer}}`, `{{Assurance}}`, `{{Total_A_Regler}}` (= 1er loyer + caution + assurance)
 
-### 4.5 Variables EDL — sortie (en blanc dans le template, repassées en noir si renseignées)
-`{{Compteur_Eau}}`, `{{Compteur_Elec}}`, `{{Compteur_Eau_Sortie}}`, `{{Compteur_Elec_Sortie}}`, `{{Locataire_Nouvelle_Adresse}}`
+### 4.5 Variables EDL
+`{{Compteur_Eau}}`, `{{Compteur_Elec}}` (entrée). Les relevés de sortie et la nouvelle adresse sont saisis à la main dans le Google Doc.
 
 ### 4.6 Variables Quittance
 `{{Mois_en_cours}}` (titre du PDF + email), `{{Mois_en_cours_début}}`, `{{Mois_en_cours_fin}}`, `{{Date_Quittance}}`, `{{Date_Paiement}}`
@@ -393,7 +390,6 @@ l'actualisation suivante reprend où elle s'était arrêtée.
 | `{{Locataire_Nom}}` | ✓ | ✓ | ✓ | ✓ | |
 | `{{Locataire_Prenom}}` | | | | ✓ | ✓ |
 | `{{Locataire_Date}}` / `{{Locataire_Lieu}}` / `{{Locataire_Adresse}}` | ✓ | | | | |
-| `{{Locataire_Nouvelle_Adresse}}` | | ✓ | | | |
 | `{{Location_Adresse}}` | ✓ | | ✓ | ✓ | ✓ |
 | `{{Location_Surface}}` / `{{Location_Pieces}}` / `{{Location_Construction_Date}}` / `{{Chauffage}}` / `{{Eau}}` | ✓ | | | | |
 | `{{Chambre}}` | ✓ | ✓ | | ✓ | ✓ |
@@ -401,7 +397,7 @@ l'actualisation suivante reprend où elle s'était arrêtée.
 | `{{Caution}}` | ✓ | | | | ✓ |
 | `{{Loyer_Date}}` | ✓ | | | | |
 | `{{Date_Début}}` / `{{Date_Fin}}` | ✓ | | | ✓ | ✓ |
-| `{{Compteur_Eau}}` / `{{Compteur_Elec}}` (+ Sortie) | | ✓ | | | |
+| `{{Compteur_Eau}}` / `{{Compteur_Elec}}` | | ✓ | | | |
 | `{{Mois_en_cours_début}}` / `{{Mois_en_cours_fin}}` / `{{Date_Paiement}}` / `{{Date_Quittance}}` | | | ✓ | ✓ | |
 | `{{Mois_en_cours}}` | | | | | ✓ |
 | `{{1er_Loyer}}` / `{{Assurance}}` / `{{Total_A_Regler}}` | | | | ✓ | ✓ |
@@ -423,9 +419,8 @@ l'actualisation suivante reprend où elle s'était arrêtée.
 1. Copie le template (`ID_EDL_TEMPLATE`)
 2. **Supprime les sections des chambres non concernées** (`removeOtherRoomSections`) en cherchant les marqueurs `CHAMBRE N°1/2/3`
 3. Remplace variables d'entrée (compteurs)
-4. Pour les variables de sortie : si la cellule du Sheet est renseignée → remplace + repasse le texte en **noir** (`setTextColor`). Sinon, la balise reste en blanc (invisible) dans le PDF.
-5. Génère le PDF (le doc Google reste dispo, contrairement au bail)
-6. Écrit `ID_PDF_EDL`
+4. Génère le PDF (le doc Google reste dispo, contrairement au bail)
+5. Écrit `ID_PDF_EDL`
 
 ### 5.3 Génération de la quittance (`generateQuittance`)
 1. Détection automatique premier/dernier loyer via **`detectMontantOverride(tenant, chambre, mois, annee)`** (helper partagé menu / groupé / web app) :
@@ -491,12 +486,12 @@ Supprimé de l'UI : l'ancien sélecteur global « Colocataire actif », la carte
 ### 5.6bis Fin de location
 - **Saisie** : à réception du préavis, renseigner `Date_Fin` → la formule `Dernier_Loyer` se calcule.
 - **`menuRepondrePreavis`** : brouillon Gmail au locataire (template `REPONSE_PREAVIS`). Pré-requis : `EMAIL` + `Date_Fin` renseignés. Avertit si `Dernier_Loyer` vide.
-- **`menuEnvoyerEDLAmi`** / `createEDLAmiDraft` : brouillon Gmail à `EMAIL_AMI_EDL` (Config) avec l'EDL en **.docx** (export du Google Doc via `exportDocAsDocx` + `UrlFetchApp` + token OAuth) et en **PDF**. L'ID du doc vient de `ID_DOC_EDL` (via `findEDLDocId`, fallback recherche par nom).
+- **`menuEnvoyerEDLAmi`** / `createEDLAmiDraft` : brouillon Gmail à `EMAIL_AMI_EDL` (Config) contenant le **lien du Google Doc** de l'EDL, sans pièce jointe. L'ami complète directement ce Doc (constats, relevés de sortie) ; le bailleur le lui partage **à la main** (aucun partage Drive par le code). L'ID vient de `ID_DOC_EDL` (via `findEDLDocId`, fallback recherche par nom). ⚠️ Ne jamais régénérer l'EDL en fin de bail : la régénération recopie le modèle et efface les constats de l'ami.
 - **Quittance de sortie** : détection automatique (cf. 5.3). ⚠️ Générer la dernière quittance **avant** de décocher `Actif` (inactif = quittance bloquée).
 - **Archivage Drive** : `archiverDossiersInactifs()` déplace les dossiers `LOCATAIRES/<Nom>` des colocataires inactifs (`isTenantParti`) vers `LOCATAIRES/OLD` (créé automatiquement, idempotent). Déclenché par trigger mensuel (`triggerArchivageMensuel`, le 1er vers 6h, installé une fois via `installerTriggerArchivage`) ou via le menu. `getOrCreateTenantFolder` cherche aussi dans `OLD` pour ne pas recréer de dossier vide après archivage.
 
 ### 5.7 Garde-fous
-- Quittance interdite si `STATUT === 'Parti'`.
+- Quittance interdite si le colocataire est inactif (`isTenantParti` : case `Actif` décochée, ou ancien texte « Parti »).
 - Toutes les actions menu vérifient les ID requis dans Config (lèvent une erreur explicite si manquant).
 - Toutes les actions sont précédées d'une boîte de confirmation `YES/NO`.
 
@@ -547,9 +542,12 @@ L'état des lieux est **un seul Google Doc de travail** (`ID_DOC_EDL`), utilisé
 
 - **entrée** : copie technique → marqueurs `ENTREE` activés, marqueurs `SORTIE` effacés → PDF
   d'entrée signé, archivé `…_EDL_ENTREE_<NOM>_SIGNE.pdf` ;
-- **sortie** : l'utilisateur complète **le même Doc** (états, commentaires, relevés, clés) → nouvelle
-  copie technique → marqueurs `SORTIE` activés, `ENTREE` effacés → **nouveau** PDF contenant les
-  données d'entrée *et* de sortie, archivé `…_EDL_SORTIE_<NOM>_SIGNE.pdf`.
+- **sortie** : l'ami complète **le même Doc** (états, relevés, commentaires, clés) → nouvelle copie technique →
+  marqueurs `SORTIE` activés, `ENTREE` effacés → **nouveau** PDF contenant les données d'entrée
+  *et* de sortie, archivé `…_EDL_SORTIE_<NOM>_SIGNE.pdf`.
+
+Avant un envoi `EDL_SORTIE`, `verifierEdlSortieComplete` avertit si le Doc n'a pas été modifié
+depuis la campagne d'entrée.
 
 Garanties (couvertes par les tests) : le PDF d'entrée signé n'est jamais écrasé ; le Doc de travail
 reste modifiable et garde ses marqueurs ; aucun placeholder Documenso n'y est jamais écrit ; les
@@ -575,12 +573,12 @@ Le même contenu envoyé aux mêmes personnes produit le même identifiant : le 
 Dans `LOCATAIRES/<Locataire_Nom>/Signature/`, noms déterministes :
 
 ```
-<yyyy-MM-dd>_<Bail|EDL_ENTREE|EDL_SORTIE>_<NOM>_<NON_SIGNE|SIGNE>.pdf
+<yyyy-MM-dd>_<Bail|EDL_ENTREE|EDL_SORTIE>_<NOM>_SIGNE.pdf
 <yyyy-MM-dd>_Certificat-signature_<NOM>.pdf
 <yyyy-MM-dd>_Journal-audit_<NOM>.pdf
 ```
 
-Le PDF non signé exactement envoyé à Documenso est conservé. **Tous** les `envelopeItems` sont
+Le PDF `…_NON_SIGNE.pdf` est envoyé à Documenso puis mis à la corbeille (conservé seulement en mode test). Le PDF non signé du dossier locataire (`ID_PDF_BAIL` / `ID_PDF_EDL`) est retiré quand le signé est archivé ; la fiche pointe alors vers ce PDF signé. **Tous** les `envelopeItems` sont
 parcourus (jamais seulement le premier) ; chaque fichier écrit est relu pour confirmer sa création,
 et un document déjà archivé n'est pas re-téléchargé. Le certificat et le journal sont « best
 effort ». Un archivage incomplet laisse la campagne en `ERROR` / `ARCHIVAGE_PARTIEL` : elle ne passe
@@ -640,7 +638,6 @@ Une campagne `CANCELLED` ou `REJECTED` ne protège rien : elle ne bloque pas la 
 | `getOrCreateTenantFolder(config, name)` | Sous-dossier par locataire dans Drive |
 | `getOrCreateSubFolder(parent, name)` | Sous-dossier générique |
 | `createLeasePdf(docId, name, folder)` | Convertit un Google Doc en PDF dans le dossier |
-| `setTextColor(body, text, hexColor)` | Repasse en couleur (utilisé pour l'EDL sortie) |
 | `getEmailTemplate(name)` | Lit `{objet, corps}` depuis l'onglet Templates |
 | `replaceEmailPlaceholders(text, tenant, config, chambre)` | Remplace les `{{var}}` dans un email |
 | `getFolderAttachments(folderId)` | Liste les blobs d'un dossier Drive (pour PJ) |
@@ -656,8 +653,8 @@ Une campagne `CANCELLED` ou `REJECTED` ne protège rien : elle ne bloque pas la 
 | `detectMontantOverride(tenant, chambre, mois, annee)` | Détecte premier/dernier loyer proratisé → `{montant, type}` |
 | `updateTenantCellIfExists(...)` | Comme `updateTenantCell` mais silencieux si colonne absente (ex: `ID_DOC_EDL`) |
 | `findEDLDocId(tenant, config)` | ID du Google Doc EDL (colonne `ID_DOC_EDL`, fallback recherche par nom) |
-| `exportDocAsDocx(docId, name)` | Exporte un Google Doc en blob `.docx` |
-| `createEDLAmiDraft(...)` / `menuEnvoyerEDLAmi()` | Brouillon Gmail EDL Word+PDF à l'ami (`EMAIL_AMI_EDL`) |
+| `googleDocEditUrl(docId)` | URL d'édition d'un Google Doc |
+| `createEDLAmiDraft(...)` / `menuEnvoyerEDLAmi()` | Brouillon Gmail à l'ami (`EMAIL_AMI_EDL`) avec le lien du Google Doc de l'EDL |
 | `menuRepondrePreavis()` | Brouillon Gmail réponse au préavis (template `REPONSE_PREAVIS`) |
 | `archiverDossiersInactifs()` / `menuArchiverDossiersInactifs()` | Déplace les dossiers des inactifs vers `LOCATAIRES/OLD` |
 | `triggerArchivageMensuel()` / `installerTriggerArchivage()` | Trigger mensuel d'archivage (le 1er vers 6h) |
@@ -715,10 +712,10 @@ Une campagne `CANCELLED` ou `REJECTED` ne protège rien : elle ne bloque pas la 
 5. **Quittance — premier/dernier loyer** : détection sur `mois/année === Date_Début` (premier) ou `=== Date_Fin` (dernier, prioritaire). `1er_Loyer` et `Dernier_Loyer` sont en TTC (charges incluses). `Dernier_Loyer` est une **formule** dans le Sheet (prorata jours réels) — si entrée et sortie tombent le même mois, écraser la formule manuellement sur la ligne.
 6. **Drive** : le Google Doc intermédiaire de la **quittance** est mis à la corbeille une fois le PDF créé. Ceux du **bail** (`ID_DOC_BAIL`) et de l'**EDL** (`ID_DOC_EDL`) sont **conservés** : ce sont les documents de travail que la signature électronique copie. Les copies techniques de signature vivent dans `Signature/_Technique/` et sont jetées après export réussi (conservées en cas d'échec, pour diagnostic).
 7. **Colonne A `Actif`** : case à cocher booléenne. Cochée = actif, décochée = inactif/parti. Helpers `isTenantActif` / `isTenantParti` lisent la valeur de façon flexible (booléen OU ancien texte « Parti »). Un colocataire inactif bloque la génération de quittances. **Les macros n'écrivent jamais cette colonne** — elle se gère manuellement dans le Sheet (case à cocher colonne A).
-8. **Emails** : `createDraft` pour les emails à fort enjeu (dossier, demande de pièces) → relecture manuelle. `sendEmail` pour les quittances → envoi direct.
+8. **Emails** : `createDraft` pour les emails à fort enjeu (dossier, demande de pièces) et pour la quittance depuis le menu → relecture manuelle. `sendEmail` uniquement pour le bouton web « Quittance 1 clic » → envoi direct.
 9. **Signature électronique** : automatisée via **Documenso** (`Signature.gs`, cf. §5.8 et
-   [`docs/documenso.md`](docs/documenso.md)). Le template email `ENVOI_DOCUMENTS` mentionne encore
-   « Yousign » — à mettre à jour dans l'onglet `Templates` du Sheet (contenu non versionné).
+   [`docs/documenso.md`](docs/documenso.md)). Le texte du template email `ENVOI_DOCUMENTS`
+   (onglet `Templates`, non versionné) doit annoncer l'email Documenso au lieu de Yousign.
 10. **Modèles Docs et signature** : les huit marqueurs internes (`[[SIGNATURE_BAILLEUR_BAIL]]`,
     `[[DATE_LOCATAIRE_SORTIE]]`…) doivent être ajoutés **à la main** dans les cellules de signature
     des modèles de bail et d'EDL — ils vivent sur Drive, pas dans le repo. Leur syntaxe `[[...]]`
@@ -748,6 +745,4 @@ Une campagne `CANCELLED` ou `REJECTED` ne protège rien : elle ne bloque pas la 
 
 ## 8. Évolutions possibles (idées non implémentées)
 
-- Génération mensuelle automatique des quittances pour tous les locataires actifs (déclencheur Apps Script).
-- Tableau de bord rentabilité (loyers perçus vs charges depuis l'onglet Comptabilité).
 - Validation automatique de la cohérence Locataires / Chambres (chambre occupée par 1 seul locataire actif à la fois).

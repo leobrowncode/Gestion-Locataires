@@ -63,6 +63,7 @@ var DOCUMENSO_ENDPOINTS = {
   envelopeGet:         { method: 'get',  path: '/envelope/{envelopeId}' },
   envelopeDistribute:  { method: 'post', path: '/envelope/distribute' },
   envelopeCancel:      { method: 'post', path: '/envelope/cancel' },
+  fieldUpdateMany:     { method: 'post', path: '/envelope/field/update-many' },
   itemDownload:        { method: 'get',  path: '/envelope/item/{envelopeItemId}/download' },
   certificateDownload: { method: 'get',  path: '/envelope/{envelopeId}/certificate/download' },
   auditLogDownload:    { method: 'get',  path: '/envelope/{envelopeId}/audit-log/download' }
@@ -729,7 +730,12 @@ function documensoNormaliserEnveloppe(json) {
         ? null : c.envelopeItemId.toString(),
       type: (c.type || '').toString().toUpperCase(),
       recipientId: (c.recipientId === undefined || c.recipientId === null)
-        ? null : c.recipientId.toString()
+        ? null : c.recipientId.toString(),
+      // Pourcentages de page (0–100). Absents quand l'API ne les renvoie pas.
+      positionX: documensoNombre(c.positionX),
+      positionY: documensoNombre(c.positionY),
+      width: documensoNombre(c.width),
+      height: documensoNombre(c.height)
     });
   }
 
@@ -939,6 +945,38 @@ function documensoValiderChamps(enveloppe, signataires, attendus) {
 
   return { ok: problemes.length === 0, problemes: problemes, parDocument: parDocument, total: total };
 }
+
+/** Nombre ou null. Les coordonnées Documenso arrivent souvent en chaînes. */
+function documensoNombre(valeur) {
+  if (valeur === null || valeur === undefined || valeur === '') return null;
+  var n = parseFloat(valeur);
+  return isNaN(n) ? null : n;
+}
+
+/**
+ * Agrandit les champs SIGNATURE d'une enveloppe encore en brouillon.
+ *
+ * La détection automatique cale la taille du champ sur le rectangle du texte
+ * {{signature,rN}} — une ligne de 11 pt, donc une signature minuscule. Cet
+ * appel agrandit la largeur et la hauteur (pourcentages de la page) et
+ * décale la date du même signataire sous ce rectangle, pour éviter qu'elle
+ * soit recouverte. La position horizontale du placeholder est conservée.
+ *
+ * @param {string} envelopeId
+ * @param {Array<Object>} data — [{ id, type:'SIGNATURE', width, height }]
+ * @return {Object} Réponse brute.
+ */
+DocumensoClient.prototype.updateFields = function(envelopeId, data) {
+  var ep = this._endpoint('fieldUpdateMany');
+  var reponse = this._fetch(ep.method, ep.url, {
+    payload: JSON.stringify({ envelopeId: envelopeId, data: data }),
+    contentType: 'application/json',
+    accept: 'application/json',
+    stage: 'fields',
+    envelopeId: envelopeId
+  });
+  return this._json(reponse, 'fields');
+};
 
 /** Normalise un titre de document pour la comparaison (casse, extension, espaces). */
 function documensoNormaliserTitre(titre) {

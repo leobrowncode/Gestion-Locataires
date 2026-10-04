@@ -85,6 +85,9 @@ function routeur(cfg) {
       return resoudre('distribute', { code: 200, corps: distributionOk() });
     }
     if (url.indexOf('/envelope/cancel') !== -1) return resoudre('cancel', { code: 200, corps: { success: true } });
+    if (url.indexOf('/envelope/field/update-many') !== -1) {
+      return resoudre('fields', { code: 200, corps: { data: [] } });
+    }
     if (url.indexOf('/certificate/download') !== -1) {
       return resoudre('certificat', { code: 200, corps: '%PDF certificat',
                                       headers: { 'Content-Type': 'application/pdf' } });
@@ -543,6 +546,69 @@ test('les deux signataires terminés → COMPLETED après archivage', () => {
   assertContient(suivi.signedPdfFileIds, 'BAIL=', 'PDF signé référencé');
   assert(fichiersDrive(env).some((n) => /_Bail_DUPONT_SIGNE\.pdf$/.test(n)),
          'le PDF signé est archivé dans Drive');
+  assert(!fichiersDrive(env).some((n) => /_NON_SIGNE\.pdf$/.test(n)),
+         'le PDF non signé ne reste pas dans Signature');
+});
+
+test('la signature est agrandie et la date est décalée en dessous', () => {
+  const env = harness.creerEnvironnement();
+  const items = itemsPour(env, 'BAIL');
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', {
+      items,
+      fields: [
+        { id: 1, envelopeItemId: items[0].id, type: 'SIGNATURE', recipientId: 101, positionX: '10', positionY: '80' },
+        { id: 2, envelopeItemId: items[0].id, type: 'DATE', recipientId: 101, positionX: '10', positionY: '82' },
+        { id: 3, envelopeItemId: items[0].id, type: 'SIGNATURE', recipientId: 102, positionX: '80', positionY: '92' },
+        { id: 4, envelopeItemId: items[0].id, type: 'DATE', recipientId: 102, positionX: '80', positionY: '94' }
+      ]
+    }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+
+  const appel = env.urlFetch.appels().find((a) => a.url.indexOf('/field/update-many') !== -1);
+  assert(appel, 'les champs sont mis à jour avant distribution');
+  const corps = JSON.parse(appel.params.payload);
+  assertEgal(corps.data[0].type, 'SIGNATURE', 'la signature du bailleur est agrandie');
+  assertEgal(corps.data[0].width, 28, 'largeur standard');
+  assertEgal(corps.data[0].height, 8, 'hauteur standard');
+  assertEgal(corps.data[1].type, 'DATE', 'la date du bailleur est déplacée');
+  assertEgal(corps.data[1].positionY, 89, 'la date passe sous le rectangle de signature');
+  assert(corps.data[1].positionY >= corps.data[0].height + 80, 'la date ne chevauche pas la signature');
+  const signatureLocataire = corps.data.find((c) => c.id === 3);
+  assert(signatureLocataire.height < 8, 'près du bas de page, la signature s\'arrête avant la date');
+  assert(signatureLocataire.height + 92 <= 94, 'cette signature ne recouvre pas sa date');
+  const distrib = urls(env).findIndex((u) => u.indexOf('/distribute') !== -1);
+  const maj = urls(env).findIndex((u) => u.indexOf('/field/update-many') !== -1);
+  assert(maj !== -1 && maj < distrib, 'agrandissement avant distribution');
+});
+
+test('archivage : le PDF non signé du dossier locataire est retiré', () => {
+  const env = harness.creerEnvironnement();
+  const pdfLocataire = env.drive.creerFichierBlob(
+    'Bail_DUPONT.pdf',
+    { getName: () => 'Bail_DUPONT.pdf', copyBlob() { return this; }, getBytes: () => [37] }
+  );
+  env.ctx.updateTenantCell(env.onglets.get('Locataires'), 2, 'ID_PDF_BAIL', pdfLocataire.id);
+
+  const items = itemsPour(env, 'BAIL');
+  let phase = 'draft';
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: phase === 'draft'
+      ? enveloppe('DRAFT', { items })
+      : enveloppe('COMPLETED', { items, signes: ['SIGNED', 'SIGNED'] }) })
+  }));
+
+  env.ctx.envoyerDemandeSignature(2, 'BAIL');
+  phase = 'completed';
+  env.ctx.actualiserStatutsSignature();
+
+  assert(env.drive.fichiers.get(pdfLocataire.id).trashed,
+         'le PDF non signé du dossier locataire est à la corbeille');
+  const tenant = env.ctx.getTenantByRow(2);
+  assert(String(tenant.ID_PDF_BAIL).indexOf('file-') === 0, 'la fiche pointe vers le PDF signé');
+  assert(!env.drive.fichiers.get(tenant.ID_PDF_BAIL).trashed, 'le PDF signé reste en place');
 });
 
 test('email du bailleur invalide : envoi bloqué avant tout appel API', () => {
@@ -1789,6 +1855,90 @@ test('régénération : bail + EDL ne bloque que sur ce qu\'il régénère vraim
 });
 
 // ---------------------------------------------------------------------------
+// M. EDL COMPLÉTÉ PAR L'AMI DANS LE GOOGLE DOC
+// ---------------------------------------------------------------------------
+
+test('EDL entrée : seuls les placeholders de signature partent dans le PDF', () => {
+  const env = harness.creerEnvironnement();
+  env.urlFetch.setRouteur(routeur());
+
+  const res = env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE', { dryRun: true });
+
+  assertEgal(res.documents[0].placeholders.length, 4, 'seuls les 4 placeholders de signature');
+  const pdf = [...env.drive.fichiers.values()]
+    .find((f) => f.type === 'blob' && /_EDL_ENTREE_DUPONT_NON_SIGNE\.pdf$/.test(f.name));
+  const texte = pdf.blob.getDataAsString();
+  assertContient(texte, '{{signature,r1}}', 'les placeholders de signature restent');
+  assertAbsent(texte, '{{Compteur_Eau_Sortie}}', 'plus de balise de relevé de sortie');
+  assertAbsent(texte, '{{Locataire_Nouvelle_Adresse}}', 'plus de balise de nouvelle adresse');
+});
+
+test('EDL : une vraie variable oubliée reste bloquante', () => {
+  const env = harness.creerEnvironnement({
+    docEdlTravail: harness.DOC_EDL_TRAVAIL.concat(['Loyer : {{Loyer_CC}}'])
+  });
+  env.urlFetch.setRouteur(routeur());
+
+  assertLeve(() => env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE', { dryRun: true }),
+             '{{Loyer_CC}}', 'une variable oubliée bloque l\'envoi');
+});
+
+test('EDL sortie : Doc non modifié depuis l\'entrée signalé, Doc modifié accepté', () => {
+  const env = harness.creerEnvironnement({ locataires: [locataireSortie()] });
+  const doc = env.drive.fichiers.get(env.ids.edlTravail);
+  doc.lastUpdated = new Date(2026, 8, 1, 10, 0, 0);
+  env.urlFetch.setRouteur(routeur({
+    get: () => ({ code: 200, corps: enveloppe('DRAFT', { items: itemsPour(env, 'EDL_ENTREE') }) })
+  }));
+  env.ctx.envoyerDemandeSignature(2, 'EDL_ENTREE');
+
+  const avant = env.ctx.preflightSignature(env.ctx.chargerContexteSignature(2, 'EDL_SORTIE'), { dryRun: true });
+  assertContient(avant.avertissements.join(' | '), 'n\'a pas été modifié', 'Doc inchangé signalé');
+
+  doc.lastUpdated = new Date(2027, 7, 31, 18, 0, 0);
+  const apres = env.ctx.preflightSignature(env.ctx.chargerContexteSignature(2, 'EDL_SORTIE'), { dryRun: true });
+  assertAbsent(apres.avertissements.join(' | '), 'n\'a pas été modifié', 'Doc complété accepté');
+});
+
+function envAvecTemplateAmi(corps) {
+  const env = harness.creerEnvironnement({ config: { EMAIL_AMI_EDL: 'ami@example.com' } });
+  env.onglets.set('Templates', new (require('./stubs').FakeSheet)('Templates', [
+    ['NOM_TEMPLATE', 'OBJET', 'CORPS'],
+    ['ENVOI_EDL_AMI', 'EDL {{Locataire_Nom}}', corps]
+  ]));
+  const brouillons = [];
+  env.ctx.GmailApp.createDraft = (to, objet, texte, options) => {
+    brouillons.push({ to, objet, options });
+    return { getId: () => 'draft' };
+  };
+  return { env, brouillons };
+}
+
+test('email à l\'ami : lien du Google Doc, aucune pièce jointe', () => {
+  const { env, brouillons } = envAvecTemplateAmi('<p>Remplis : {{Lien_EDL}}</p>');
+  const tenant = env.ctx.getTenantByRow(2);
+
+  env.ctx.createEDLAmiDraft(tenant, env.ctx.getConfig(), env.ctx.getChambreData(tenant.Chambre));
+
+  assertEgal(brouillons.length, 1, 'un brouillon');
+  assertEgal(brouillons[0].to, 'ami@example.com', 'adressé à l\'ami');
+  assert(!brouillons[0].options.attachments, 'aucune pièce jointe (ni Word, ni PDF)');
+  assertContient(brouillons[0].options.htmlBody,
+                 'https://docs.google.com/document/d/' + env.ids.edlTravail + '/edit', 'lien du Doc');
+  assertAbsent(brouillons[0].options.htmlBody, '{{Lien_EDL}}', 'balise remplacée');
+});
+
+test('email à l\'ami : lien ajouté si le template ne prévoit pas {{Lien_EDL}}', () => {
+  const { env, brouillons } = envAvecTemplateAmi('<p>Ancien texte</p>');
+  const tenant = env.ctx.getTenantByRow(2);
+
+  env.ctx.createEDLAmiDraft(tenant, env.ctx.getConfig(), env.ctx.getChambreData(tenant.Chambre));
+
+  assertContient(brouillons[0].options.htmlBody, '/document/d/' + env.ids.edlTravail + '/edit',
+                 'le lien n\'est jamais oublié');
+});
+
+// ---------------------------------------------------------------------------
 // Jeux de données partagés
 // ---------------------------------------------------------------------------
 
@@ -1812,13 +1962,10 @@ function locataireBase() {
   };
 }
 
-/** Locataire en fin de bail : Date_Fin et relevés de sortie renseignés. */
+/** Locataire en fin de bail : Date_Fin renseignée. Les relevés de sortie vivent dans le Doc. */
 function locataireSortie() {
   return Object.assign(locataireBase(), {
-    'Date_Fin': new Date(2027, 7, 31),
-    Compteur_Eau_Sortie: '189',
-    Compteur_Elec_Sortie: '5901',
-    Locataire_Nouvelle_Adresse: '9 rue Suivante, 33000 Bordeaux'
+    'Date_Fin': new Date(2027, 7, 31)
   });
 }
 

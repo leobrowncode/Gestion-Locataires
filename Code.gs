@@ -51,7 +51,7 @@ function onOpen() {
     .addItem('🚫 Annuler une demande de signature', 'menuAnnulerSignature')
     .addSeparator()
     .addItem('📩 Répondre au préavis (consignes ménage)', 'menuRepondrePreavis')
-    .addItem('📧 Envoyer l\'EDL à l\'ami (Word + PDF)', 'menuEnvoyerEDLAmi')
+    .addItem('📧 Envoyer le lien de l\'EDL à l\'ami', 'menuEnvoyerEDLAmi')
     .addItem('🗂️ Archiver les dossiers inactifs (→ OLD)', 'menuArchiverDossiersInactifs')
     .addItem('🔧 Réparer le suivi des loyers', 'menuReparerSuiviLoyers')
     .addSeparator()
@@ -518,47 +518,12 @@ function generateEDL(tenant, config) {
     body.replaceText(escapeRegex(placeholder), replacements[placeholder]);
   }
 
-  // Champs de sortie : balises en blanc dans le template.
-  // Si la cellule du Sheet est renseignée → remplacer la balise et colorier en noir.
-  // Si la cellule est vide → ne pas toucher (la balise reste en blanc = invisible).
-  var sortieFields = [
-    { placeholder: '{{Compteur_Eau_Sortie}}', value: tenant['Compteur_Eau_Sortie'] },
-    { placeholder: '{{Compteur_Elec_Sortie}}', value: tenant['Compteur_Elec_Sortie'] },
-    { placeholder: '{{Locataire_Nouvelle_Adresse}}', value: tenant['Locataire_Nouvelle_Adresse'] }
-  ];
-
-  sortieFields.forEach(function(field) {
-    if (field.value && field.value.toString().trim() !== '') {
-      var formattedValue = formatValue(field.value);
-      body.replaceText(escapeRegex(field.placeholder), formattedValue);
-      setTextColor(body, formattedValue, '#000000');
-    }
-  });
-
   doc.saveAndClose();
 
   // Générer le PDF
   var pdfFile = createLeasePdf(docId, docName, folder);
 
   return { docId: docId, pdfFile: pdfFile };
-}
-
-/**
- * Cherche toutes les occurrences d'un texte dans le body et force leur couleur.
- * Utilisé pour repasser en noir les valeurs de sortie initialement en blanc.
- * @param {Body} body — Corps du document Google Docs.
- * @param {string} searchText — Texte à chercher.
- * @param {string} hexColor — Couleur hex (ex: '#000000').
- */
-function setTextColor(body, searchText, hexColor) {
-  var found = body.findText(escapeRegex(searchText));
-  while (found) {
-    var element = found.getElement();
-    var start = found.getStartOffset();
-    var end = found.getEndOffsetInclusive();
-    element.asText().setForegroundColor(start, end, hexColor);
-    found = body.findText(escapeRegex(searchText), found);
-  }
 }
 
 /**
@@ -1806,24 +1771,17 @@ function findEDLDocId(tenant, config) {
   return best.getId();
 }
 
-/**
- * Exporte un Google Doc au format Word (.docx).
- * @param {string} docId — ID du Google Doc.
- * @param {string} name — Nom du fichier (sans extension).
- * @return {Blob} Blob .docx.
- */
-function exportDocAsDocx(docId, name) {
-  var url = 'https://docs.google.com/document/d/' + docId + '/export?format=docx';
-  var response = UrlFetchApp.fetch(url, {
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }
-  });
-  return response.getBlob().setName(name + '.docx');
+/** URL d'édition d'un Google Doc. */
+function googleDocEditUrl(docId) {
+  return 'https://docs.google.com/document/d/' + docId + '/edit';
 }
 
 /**
  * Crée un brouillon Gmail pour l'AMI qui réalise les états des lieux.
  * Destinataire : EMAIL_AMI_EDL (onglet Config).
- * Pièces jointes : EDL en Word (.docx, modifiable) + EDL en PDF.
+ * Pas de pièce jointe : l'ami complète directement le Google Doc de travail,
+ * partagé à la main par le bailleur. Le lien remplace {{Lien_EDL}} dans le
+ * template, ou est ajouté en fin de message si le template ne le prévoit pas.
  * @param {Object} tenant — Données locataire.
  * @param {Object} config — Données config.
  * @param {Object} chambre — Données chambre.
@@ -1833,31 +1791,26 @@ function createEDLAmiDraft(tenant, config, chambre) {
   var emailAmi = (config['EMAIL_AMI_EDL'] || '').toString().trim();
   if (!emailAmi) throw new Error('EMAIL_AMI_EDL manquant dans l\'onglet Config.');
 
-  var pdfEdlId = (tenant['ID_PDF_EDL'] || '').toString().trim();
-  if (!pdfEdlId) throw new Error('Aucun PDF d\'état des lieux. Générez d\'abord l\'EDL.');
-
-  var docId = findEDLDocId(tenant, config);
-  var docName = DriveApp.getFileById(docId).getName();
-
-  var attachments = [
-    exportDocAsDocx(docId, docName),
-    DriveApp.getFileById(pdfEdlId).getBlob()
-  ];
+  var lien = googleDocEditUrl(findEDLDocId(tenant, config));
 
   var template = getEmailTemplate('ENVOI_EDL_AMI');
   var objet = replaceEmailPlaceholders(template.objet, tenant, config, chambre);
   var corps = replaceEmailPlaceholders(template.corps, tenant, config, chambre);
+  if (corps.indexOf('{{Lien_EDL}}') !== -1) {
+    corps = corps.replace(/\{\{Lien_EDL\}\}/g, lien);
+  } else {
+    corps += '<p>Lien de l\'état des lieux : <a href="' + lien + '">' + lien + '</a></p>';
+  }
 
   return GmailApp.createDraft(emailAmi, objet, '', {
     htmlBody: corps,
-    attachments: attachments,
     name: config['Bailleur_Nom']
   });
 }
 
 /**
- * Menu : Créer un brouillon Gmail avec l'EDL (Word + PDF) pour l'ami
- * qui réalise les états des lieux.
+ * Menu : Créer un brouillon Gmail avec le lien du Google Doc de l'EDL pour
+ * l'ami qui réalise les états des lieux.
  */
 function menuEnvoyerEDLAmi() {
   var ui = SpreadsheetApp.getUi();
@@ -1873,7 +1826,9 @@ function menuEnvoyerEDLAmi() {
       'Envoyer l\'EDL à l\'ami',
       'Créer un brouillon Gmail pour ' + emailAmi + ' :\n\n' +
       'Locataire : ' + tenant['Locataire_Nom'] + ' (Chambre ' + tenant['Chambre'] + ')\n' +
-      'Pièces jointes : EDL en Word (modifiable) + EDL en PDF\n\n' +
+      'Contenu : lien du Google Doc de l\'EDL, à compléter directement\n\n' +
+      '⚠️ Partagez le Google Doc avec ' + emailAmi + ' (droits de modification) ' +
+      'avant d\'envoyer le brouillon.\n\n' +
       'Créer le brouillon ?',
       ui.ButtonSet.YES_NO
     );

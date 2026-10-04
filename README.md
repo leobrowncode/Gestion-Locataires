@@ -85,8 +85,9 @@ quittance, l'enregistre dans `Suivi Loyers` et l'envoie. Le premier loyer (entr�
 et le dernier (mois de sortie) sont proratisés automatiquement.
 
 **Fin de location** — saisir `Date_Fin` ▸ répondre au préavis (consignes de ménage, dernier loyer,
-restitution du dépôt) ▸ envoyer l'EDL de sortie au format Word ▸ générer la dernière quittance
-▸ décocher `Actif` ▸ le dossier Drive est archivé au prochain passage du trigger.
+restitution du dépôt) ▸ envoyer à la personne qui fait l'état des lieux le lien du Google Doc, qu'elle
+complète directement ▸ envoyer l'EDL de sortie en
+signature ▸ générer la dernière quittance ▸ décocher `Actif` ▸ le dossier Drive est archivé au prochain passage du trigger.
 
 ## Documentation
 

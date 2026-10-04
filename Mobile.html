@@ -412,7 +412,7 @@
     <div class="section-title">Signature électronique</div>
     <p class="hint">
       Le <strong>bailleur signe d'abord</strong>, le locataire ensuite.
-      Bail + état des lieux d'entrée partent dans <strong>une seule enveloppe</strong>.
+      Parcours habituel : le bail avant l'arrivée, l'état des lieux d'entrée le jour J.
     </p>
     <p class="hint" id="sig-meta" style="color:#1a73e8;font-weight:600;">Chargement…</p>
 
@@ -427,10 +427,10 @@
 
     <p class="sub-title">Bail + état des lieux d'entrée</p>
     <p class="hint">
-      Une seule campagne pour les deux documents. « Bail + état des lieux » désigne toujours
-      l'état des lieux d'<strong>entrée</strong> : le bail ne part jamais avec celui de sortie.
+      Uniquement si tout est signé le même jour : une seule enveloppe pour les deux documents.
+      « Bail + état des lieux » désigne toujours l'état des lieux d'<strong>entrée</strong>.
     </p>
-    <button class="accent" onclick="sigPreparer('BAIL_ET_EDL_ENTREE')">✍️ Envoyer bail + EDL d'entrée</button>
+    <button class="secondary" onclick="sigPreparer('BAIL_ET_EDL_ENTREE')">✍️ Envoyer bail + EDL d'entrée</button>
 
     <div class="checkline">
       <input type="checkbox" id="sig-dryrun" onchange="sigReset()">
