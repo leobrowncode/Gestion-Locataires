@@ -56,8 +56,23 @@ function getTenantByRow(row) {
 }
 
 /**
+ * true si le locataire reste proposé à la signature électronique.
+ * Actif (y compris en préavis) ou sans Date_Fin (arrivée pas encore cochée).
+ * Un parti — inactif avec une date de fin — est exclu.
+ *
+ * @param {boolean} actif
+ * @param {*} dateFin — Date Sheets, chaîne renseignée, ou vide.
+ * @return {boolean}
+ */
+function locataireEligibleSignature(actif, dateFin) {
+  if (actif) return true;
+  if (dateFin instanceof Date) return isNaN(dateFin.getTime());
+  return !(dateFin || '').toString().trim();
+}
+
+/**
  * Liste les locataires pour la dropdown.
- * @return {Array<{row,nom,chambre,statut,email}>}
+ * @return {Array<{row,nom,chambre,statut,email,eligibleSignature}>}
  */
 function webGetTenants() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Locataires');
@@ -79,6 +94,7 @@ function webGetTenants() {
   var iEmail = col('EMAIL');
   var iBail = col('ID_PDF_BAIL');
   var iEdl = col('ID_PDF_EDL');
+  var iDateFin = col('Date_Fin');
 
   // Chambres dont la quittance du mois CIBLE (cf. getMoisQuittanceCible) est
   // déjà enregistrée — même mois que celui du bouton 1 clic.
@@ -90,12 +106,15 @@ function webGetTenants() {
     if (!nom) continue;
     var rawStatut = iStatut >= 0 ? data[r][iStatut] : '';
     var chambre = data[r][iChambre] || '';
+    var actif = statutValueIsActif(rawStatut);
+    var dateFin = iDateFin >= 0 ? data[r][iDateFin] : '';
     tenants.push({
       row: r + 1,
       nom: nom,
       chambre: chambre,
       statut: (rawStatut === true || rawStatut === false) ? '' : (rawStatut || '').toString().trim(),
-      actif: statutValueIsActif(rawStatut),
+      actif: actif,
+      eligibleSignature: locataireEligibleSignature(actif, dateFin),
       email: (iEmail >= 0 ? (data[r][iEmail] || '') : '').toString(),
       // État des documents (badges UI)
       bail: iBail >= 0 ? !!(data[r][iBail] || '').toString().trim() : false,
