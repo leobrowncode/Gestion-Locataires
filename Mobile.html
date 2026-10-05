@@ -149,6 +149,31 @@
       margin: 0 0 14px;
       letter-spacing: 0.6px;
     }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 14px;
+    }
+    .section-head .section-title { margin: 0; flex: 1; }
+    button.help-btn {
+      flex: none;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      margin: 0;
+      border-radius: 50%;
+      background: #eef2f7;
+      color: #4b5563;
+      border: 1px solid #d1d5db;
+      font-size: 0.9rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+    button.help-btn:active:not(:disabled) { background: #e2e8f0; transform: none; }
+    .row.align-end { align-items: flex-end; }
+    .row > .col-chambre { flex: 0 0 96px; }
     .badges {
       display: flex;
       flex-wrap: wrap;
@@ -311,103 +336,49 @@
 
   <!-- 1. Action mensuelle : quittance 1 clic (envoi direct) -->
   <div class="card">
-    <div class="section-title">Quittance 1 clic — colocataires actifs</div>
-    <p class="hint">
+    <div class="section-head">
+      <div class="section-title">Quittance 1 clic — colocataires actifs</div>
+      <button type="button" class="help-btn" id="hint-envoi-btn" aria-expanded="false"
+              aria-controls="hint-envoi" onclick="togglePanneau('hint-envoi')"
+              title="Envoi direct">?</button>
+    </div>
+    <p class="hint" id="hint-envoi" hidden>
       Envoi <strong>direct</strong> (sans brouillon), à cliquer dès réception du virement.
     </p>
     <p class="hint" id="mois-cible-hint" style="color:#1a73e8;font-weight:600;">Chargement…</p>
     <div id="actifs-list">
       <p style="margin:0;color:#9ca3af;font-size:0.85rem;">Chargement…</p>
     </div>
-  </div>
-
-  <!-- 2. Quittance d'un autre mois (rattrapage) — brouillon Gmail -->
-  <div class="card">
-    <div class="section-title">Quittance — autre mois</div>
-    <p class="hint">
-      Rattrapage d'un mois passé : génère le PDF et un <strong>brouillon</strong> Gmail
-      (pas d'envoi automatique).
-    </p>
-    <label for="q-tenant">Colocataire</label>
-    <select id="q-tenant" onchange="updateBadges()"><option>Chargement…</option></select>
-    <div class="badges" id="badges-quittance"></div>
-    <div class="row" style="margin:14px 0;">
-      <div>
-        <label for="mois">Mois</label>
-        <select id="mois"></select>
+    <button type="button" class="secondary" id="autre-mois-btn" style="margin-top:14px;"
+            aria-expanded="false" aria-controls="autre-mois"
+            onclick="togglePanneau('autre-mois')">Quittance d'un autre mois</button>
+    <div id="autre-mois" hidden>
+      <hr class="divider">
+      <p class="hint">
+        Rattrapage d'un mois passé : génère le PDF et un <strong>brouillon</strong> Gmail
+        (pas d'envoi automatique).
+      </p>
+      <label for="q-tenant">Colocataire</label>
+      <select id="q-tenant" onchange="updateBadges()"><option>Chargement…</option></select>
+      <div class="badges" id="badges-quittance"></div>
+      <div class="row" style="margin:14px 0;">
+        <div>
+          <label for="mois">Mois</label>
+          <select id="mois"></select>
+        </div>
+        <div>
+          <label for="annee">Année</label>
+          <input id="annee" type="number" min="2020" max="2099" inputmode="numeric">
+        </div>
       </div>
-      <div>
-        <label for="annee">Année</label>
-        <input id="annee" type="number" min="2020" max="2099" inputmode="numeric">
-      </div>
-    </div>
-    <button onclick="genQuittanceMoisChoisi()">🧾 Générer la quittance + brouillon</button>
-    <p class="hint" style="margin:12px 0 0;">
-      Seuls les colocataires cochés « Actif » (colonne A du Sheet) apparaissent ici.
-    </p>
-  </div>
-
-  <!-- 3. Onboarding nouveau locataire : candidat hors Sheet + étapes 1 à 4 -->
-  <div class="card">
-    <div class="section-title">Nouveau locataire</div>
-
-    <p class="sub-title">Avant la ligne dans le Sheet</p>
-    <p class="hint">
-      Candidat sans ligne dans le Google Sheet : saisissez son email, le brouillon Gmail
-      de demande de pièces est créé.
-    </p>
-    <label for="cand-email">Email du candidat</label>
-    <input id="cand-email" type="email" inputmode="email" autocapitalize="off"
-           autocorrect="off" spellcheck="false" placeholder="prenom.nom@email.com">
-    <div class="row" style="margin-top:12px;">
-      <div style="flex:2;">
-        <label for="cand-nom">Nom Prénom (optionnel)</label>
-        <input id="cand-nom" type="text" placeholder="DUPONT Marie">
-      </div>
-      <div style="flex:1;">
-        <label for="cand-chambre">Chambre (opt.)</label>
-        <select id="cand-chambre">
-          <option value="">—</option>
-          <option value="1">1</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-        </select>
-      </div>
-    </div>
-    <button class="secondary" style="margin-top:14px;" onclick="demandePiecesLibre()">📧 Demander les pièces (hors Sheet)</button>
-
-    <hr class="divider">
-
-    <p class="sub-title">Étapes — locataire présent dans le Sheet</p>
-    <label for="tenant-onboard">Locataire (tous, actifs ou non)</label>
-    <select id="tenant-onboard" onchange="updateOnboardBadges()"><option>Chargement…</option></select>
-    <div class="badges" id="badges-onboard" style="margin:12px 0 16px;"></div>
-    <div class="step">
-      <div class="num">1</div>
-      <button class="secondary" onclick="run('webDemandePieces', argsTOnboard, 'Création du brouillon…')">📧 Demander les pièces</button>
-    </div>
-    <div class="step">
-      <div class="num">2</div>
-      <button class="accent" onclick="genBailEdl()">📄 Générer Bail + EDL</button>
-    </div>
-    <div class="step">
-      <div class="num">3</div>
-      <button class="secondary" onclick="confirmRun('Envoyer le dossier de location (bail + EDL + docs communs) ?', 'webEnvoyerDossier', argsTOnboard, 'Création du brouillon dossier…')">📧 Envoyer le dossier</button>
-    </div>
-    <div class="step">
-      <div class="num">4</div>
-      <button class="secondary" onclick="run('webEnvoyerAttestationAssurance', argsTOnboard, 'Génération attestation…')">🛡️ Attestation d'assurance</button>
-    </div>
-    <p class="hint" style="margin:12px 0 0;">
-      Bail / EDL séparés (régénération) :
-    </p>
-    <div class="row" style="margin-top:8px;">
-      <button onclick="genBail()">📄 Bail</button>
-      <button onclick="genEdl()">📄 EDL</button>
+      <button onclick="genQuittanceMoisChoisi()">🧾 Générer la quittance + brouillon</button>
+      <p class="hint" style="margin:12px 0 0;">
+        Seuls les colocataires cochés « Actif » (colonne A du Sheet) apparaissent ici.
+      </p>
     </div>
   </div>
 
-  <!-- 4. Signature électronique (Documenso) — dossier du locataire -->
+  <!-- 2. Signature électronique (Documenso) — dossier du locataire -->
   <div class="card">
     <div class="section-title">Signature électronique</div>
     <p class="hint">
@@ -448,6 +419,66 @@
     </p>
   </div>
 
+  <!-- 3. Onboarding nouveau locataire : candidat sans ligne + étapes 1 à 4 -->
+  <div class="card">
+    <div class="section-title">Nouveau locataire</div>
+
+    <p class="sub-title">Avant la ligne dans le Sheet</p>
+    <p class="hint">
+      Candidat sans ligne dans le Google Sheet : saisissez son email, le brouillon Gmail
+      de demande de pièces est créé.
+    </p>
+    <label for="cand-email">Email du candidat</label>
+    <input id="cand-email" type="email" inputmode="email" autocapitalize="off"
+           autocorrect="off" spellcheck="false" placeholder="prenom.nom@email.com">
+    <div class="row align-end" style="margin-top:12px;">
+      <div>
+        <label for="cand-nom">Nom Prénom (optionnel)</label>
+        <input id="cand-nom" type="text" placeholder="DUPONT Marie">
+      </div>
+      <div class="col-chambre">
+        <label for="cand-chambre">Chambre (opt.)</label>
+        <select id="cand-chambre">
+          <option value="">—</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+        </select>
+      </div>
+    </div>
+    <button class="secondary" style="margin-top:14px;" onclick="demandePiecesLibre()">📧 Demander les pièces</button>
+
+    <hr class="divider">
+
+    <p class="sub-title">Étapes — locataire présent dans le Sheet</p>
+    <label for="tenant-onboard">Locataire (tous, actifs ou non)</label>
+    <select id="tenant-onboard" onchange="updateOnboardBadges()"><option>Chargement…</option></select>
+    <div class="badges" id="badges-onboard" style="margin:12px 0 16px;"></div>
+    <div class="step">
+      <div class="num">1</div>
+      <button class="secondary" onclick="run('webDemandePieces', argsTOnboard, 'Création du brouillon…')">📧 Demander les pièces</button>
+    </div>
+    <div class="step">
+      <div class="num">2</div>
+      <button class="accent" onclick="genBailEdl()">📄 Générer Bail + EDL</button>
+    </div>
+    <div class="step">
+      <div class="num">3</div>
+      <button class="secondary" onclick="confirmRun('Envoyer le dossier de location (bail + EDL + docs communs) ?', 'webEnvoyerDossier', argsTOnboard, 'Création du brouillon dossier…')">📧 Envoyer le dossier</button>
+    </div>
+    <div class="step">
+      <div class="num">4</div>
+      <button class="secondary" onclick="run('webEnvoyerAttestationAssurance', argsTOnboard, 'Génération attestation…')">🛡️ Attestation d'assurance</button>
+    </div>
+    <p class="hint" style="margin:12px 0 0;">
+      Bail / EDL séparés (régénération) :
+    </p>
+    <div class="row" style="margin-top:8px;">
+      <button onclick="genBail()">📄 Bail</button>
+      <button onclick="genEdl()">📄 EDL</button>
+    </div>
+  </div>
+
   <div class="loader-overlay" id="loader"></div>
   <div id="status"><span class="close" onclick="hideStatus()">✕</span><span id="status-text"></span></div>
 
@@ -477,6 +508,15 @@
       if (MOIS_CIBLE && MOIS_CIBLE.label) return cap(MOIS_CIBLE.label);
       var d = new Date();                       // repli avant chargement du meta
       return MOIS[d.getMonth()] + ' ' + d.getFullYear();
+    }
+
+    // Affiche ou masque un panneau (aide « ? », quittance d'un autre mois)
+    // et aligne aria-expanded du bouton qui le commande.
+    function togglePanneau(id) {
+      var panel = document.getElementById(id);
+      panel.hidden = !panel.hidden;
+      var btn = document.querySelector('[aria-controls="' + id + '"]');
+      if (btn) btn.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
     }
 
     // --- Sélecteur onboarding : tous les locataires (dont non actifs) ---
@@ -1038,9 +1078,10 @@
                      'Aucun colocataire actif');
           // Sélecteur onboarding : tout le monde (futurs locataires non encore cochés inclus)
           fillSelect(selOnb, TENANTS, prevRowOnb, 'Aucun locataire');
-          // Sélecteur signature : tout le monde également (le bail se signe
-          // avant que la case « Actif » ne soit cochée)
-          fillSelect(selSig, TENANTS, prevRowSig, 'Aucun locataire');
+          // Sélecteur signature : actifs, ou sans Date_Fin (arrivée pas encore
+          // cochée, préavis encore présent). Les partis sont exclus.
+          fillSelect(selSig, TENANTS.filter(function(x){ return x.eligibleSignature; }), prevRowSig,
+                     'Aucun locataire');
 
           renderActifs();
           updateBadges();

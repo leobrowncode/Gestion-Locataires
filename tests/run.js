@@ -1969,6 +1969,18 @@ function locataireSortie() {
   });
 }
 
+test('signature : liste limitée aux actifs et à ceux sans date de fin', () => {
+  const env = harness.creerEnvironnement();
+  const elig = env.ctx.locataireEligibleSignature;
+  assert(elig(true, ''), 'actif sans date de fin');
+  assert(elig(true, new Date(2027, 7, 31)), 'actif en préavis (Date Sheets)');
+  assert(elig(true, '31/08/2027'), 'actif avec date en texte');
+  assert(elig(false, ''), 'arrivée inactive sans date de fin');
+  assert(elig(false, '   '), 'date de fin vide (espaces)');
+  assert(!elig(false, new Date(2027, 7, 31)), 'parti : inactif avec Date');
+  assert(!elig(false, '31/08/2027'), 'parti : inactif avec chaîne');
+});
+
 // ---------------------------------------------------------------------------
 // Exécution
 // ---------------------------------------------------------------------------
